@@ -21,7 +21,7 @@ RUN chmod +x mvnw \
 FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
 RUN useradd -r -u 1001 cpn
-COPY --from=build /app/target/cpn-0.0.1-SNAPSHOT.jar /app/app.jar
+COPY --from=build /app/target/ghn-0.0.1-SNAPSHOT.jar /app/app.jar
 USER 1001
 EXPOSE 8080
 ENV SPRING_PROFILES_ACTIVE=prod,demo
