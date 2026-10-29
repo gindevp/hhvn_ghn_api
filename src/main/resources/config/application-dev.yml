@@ -1,0 +1,156 @@
+# ===================================================================
+# Spring Boot configuration for the "dev" profile.
+#
+# This configuration overrides the application.yml file.
+#
+# More information on profiles: https://www.jhipster.tech/profiles/
+# More information on configuration properties: https://www.jhipster.tech/common-application-properties/
+# ===================================================================
+
+# ===================================================================
+# Standard Spring Boot properties.
+# Full reference is available at:
+# http://docs.spring.io/spring-boot/docs/current/reference/html/common-application-properties.html
+# ===================================================================
+
+logging:
+  level:
+    ROOT: DEBUG
+    tech.jhipster: DEBUG
+    org.hibernate.SQL: DEBUG
+    com.mycompany.myapp: DEBUG
+
+spring:
+  docker:
+    compose:
+      enabled: false # local MySQL already running; Docker Desktop not required
+  devtools:
+    restart:
+      enabled: true
+      additional-exclude: static/**
+    livereload:
+      enabled: false # we use Webpack dev server + BrowserSync for livereload
+  jackson:
+    serialization:
+      indent-output: true
+  datasource:
+    type: com.zaxxer.hikari.HikariDataSource
+    url: jdbc:mysql://localhost:3306/cpn_ghn?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&useLegacyDatetimeCode=false&createDatabaseIfNotExist=true
+    username: root
+    password: 123456
+    hikari:
+      poolName: Hikari
+      auto-commit: false
+      data-source-properties:
+        cachePrepStmts: true
+        prepStmtCacheSize: 250
+        prepStmtCacheSqlLimit: 2048
+        useServerPrepStmts: true
+  liquibase:
+    # seed = FE-aligned master data (Office/Route/Vehicle/Driver). faker off to avoid collisions.
+    contexts: dev, seed
+  mail:
+    host: localhost
+    port: 25
+    username:
+    password:
+  messages:
+    cache-duration: PT1S # 1 second, see the ISO 8601 standard
+  thymeleaf:
+    cache: false
+
+server:
+  port: 7082
+  # make sure requests the proxy uri instead of the server one
+  forward-headers-strategy: native
+
+# ===================================================================
+# JHipster specific properties
+#
+# Full reference is available at: https://www.jhipster.tech/common-application-properties/
+# ===================================================================
+
+jhipster:
+  # CORS is only enabled by default with the "dev" profile
+  cors:
+    # Allow Ionic for JHipster by default (* no longer allowed in Spring Boot 2.4+)
+    allowed-origins: 'http://localhost:8100,https://localhost:8100,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:7081,http://127.0.0.1:7081,http://localhost:8081,http://127.0.0.1:8081,http://localhost:9000,https://localhost:9000'
+    allowed-origin-patterns: 'https://*.githubpreview.dev,http://192.168.*.*:7081,http://10.*.*.*:7081'
+    allowed-methods: '*'
+    allowed-headers: '*'
+    exposed-headers: 'Authorization,Link,X-Total-Count,X-${jhipster.clientApp.name}-alert,X-${jhipster.clientApp.name}-error,X-${jhipster.clientApp.name}-params'
+    allow-credentials: true
+    max-age: 1800
+  security:
+    authentication:
+      jwt:
+        # This token must be encoded using Base64 and be at least 256 bits long (you can type `openssl rand -base64 64` on your command line to generate a 512 bits one)
+        base64-secret: NmIxNjQwZmU2Mzc3MGJkZTQ4MTZjYTlmYjQxMzdmYzM5ZmZhYjY2ZjY3MzVlNDVhZTZjMWU5OGE3N2FjOGI0ODRlMzI3ZmJlMTkyMDRkZjZjMjk3NWI1YTBiNTUzMzRjOTVmODE1MzkwYzBiMTFlNTM5YWJhMTFkYWJkMWVhZDc=
+        # Token is valid 24 hours
+        token-validity-in-seconds: 86400
+        token-validity-in-seconds-for-remember-me: 2592000
+  mail: # specific JHipster mail property, for standard properties see MailProperties
+    base-url: http://127.0.0.1:7080
+  logging:
+    use-json-format: false # By default, logs are not in Json format
+    logstash: # Forward logs to logstash over a socket, used by LoggingConfiguration
+      enabled: false
+      host: localhost
+      port: 5000
+      ring-buffer-size: 512
+# ===================================================================
+# Application specific properties
+# Add your own application properties here, see the ApplicationProperties class
+# to have type-safe configuration, like in the JHipsterProperties above
+#
+# More documentation is available at:
+# https://www.jhipster.tech/common-application-properties/
+# ===================================================================
+
+# application:
+
+# VTHK / CRM passenger trips — local defaults; override with CPN_VTHK_* env (prod: env only)
+cpn:
+  vthk:
+    enabled: true
+    base-url: https://crmapi.xevietnam.com
+    app-id-access: CRM.XEVN
+    login-mobile: ${CPN_VTHK_MOBILE:19001515_crm}
+    login-password: ${CPN_VTHK_PASSWORD:CrmXEVN@01012026}
+    insecure-ssl: true
+  misa:
+    enabled: ${CPN_MISA_ENABLED:false}
+    base-url: ${CPN_MISA_BASE_URL:https://api.meinvoice.vn/api/integration}
+    app-id: ${CPN_MISA_APP_ID:f623da8a-e2c8-46a9-ad37-66939a38bf96}
+    tax-code: ${CPN_MISA_TAX_CODE:0103179782}
+    username: ${CPN_MISA_USERNAME:0987427086}
+    password: ${CPN_MISA_PASSWORD:}
+    inv-series: ${CPN_MISA_INV_SERIES:1C26MYY}
+    sign-type: ${CPN_MISA_SIGN_TYPE:2}
+    certificate-sn: ${CPN_MISA_CERTIFICATE_SN:54010C25687C47344477BDD160AB2EFF}
+    issue-only-when-requested: ${CPN_MISA_ISSUE_ONLY_WHEN_REQUESTED:true}
+  ahamove:
+    # Override: set CPN_AHAMOVE_BASE_URL. Default PROD — PARTNER_NOT_FOUND trên stg thường do key prod.
+    base-url: ${CPN_AHAMOVE_BASE_URL:https://partner-api.ahamove.com/v3}
+    insecure-ssl: ${CPN_AHAMOVE_INSECURE_SSL:true}
+  hhvn:
+    insecure-ssl: ${CPN_HHVN_INSECURE_SSL:true}
+  vtech:
+    insecure-ssl: ${CPN_VTECH_INSECURE_SSL:true}
+  tax-lookup:
+    portal-url: ${CPN_TAX_LOOKUP_PORTAL_URL:https://portal.xevietnam.com/api/fe/com/company_by_tax}
+    portal-app-id: ${CPN_TAX_LOOKUP_PORTAL_APP_ID:APP.XEVN}
+    insecure-ssl: ${CPN_TAX_LOOKUP_INSECURE_SSL:true}
+  goong:
+    base-url: ${CPN_GOONG_BASE_URL:https://rsapi.goong.io}
+  osm:
+    nominatim-base-url: ${CPN_OSM_NOMINATIM_BASE_URL:https://nominatim.openstreetmap.org}
+    photon-base-url: ${CPN_OSM_PHOTON_BASE_URL:https://photon.komoot.io}
+    user-agent: ${CPN_OSM_USER_AGENT:CPN-XE/1.0 (office-geo; contact=ops@xevietnam.local)}
+  minio:
+    enabled: ${CPN_MINIO_ENABLED:false}
+    endpoint: ${CPN_MINIO_ENDPOINT:}
+    bucket: ${CPN_MINIO_BUCKET:cpn}
+    region: ${CPN_MINIO_REGION:us-east-1}
+    access-key: ${CPN_MINIO_ACCESS_KEY:}
+    secret-key: ${CPN_MINIO_SECRET_KEY:}

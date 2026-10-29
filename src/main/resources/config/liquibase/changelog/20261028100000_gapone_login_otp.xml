@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261028100000-1" author="cpn">
+        <addColumn tableName="integration_config">
+            <column name="gapone_login_otp_enabled" type="boolean" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+            <column name="gapone_login_otp_template_id" type="varchar(64)"/>
+            <column name="gapone_login_otp_param" type="varchar(64)" defaultValue="otp"/>
+            <column name="gapone_login_otp_test_phones" type="varchar(500)" defaultValue="0393883210"/>
+            <column name="gapone_login_otp_test_code" type="varchar(10)" defaultValue="123456"/>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>

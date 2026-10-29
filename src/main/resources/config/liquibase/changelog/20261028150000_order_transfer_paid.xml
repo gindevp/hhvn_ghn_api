@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261028150000-order-transfer-paid" author="cpn">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="shipment_order" columnName="transfer_paid_at"/>
+            </not>
+        </preConditions>
+        <comment>Lúc khách chuyển khoản OnePay đủ cước đơn app (tính doanh thu như đơn đã nhập kho, huỷ không trừ).</comment>
+        <addColumn tableName="shipment_order">
+            <column name="transfer_paid_at" type="${datetimeType}"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="20261028150000-order-transfer-sandbox" author="cpn">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="shipment_order" columnName="transfer_sandbox"/>
+            </not>
+        </preConditions>
+        <comment>Chuyển khoản qua OnePay SANDBOX (đơn test): huỷ thì không giữ doanh thu.</comment>
+        <addColumn tableName="shipment_order">
+            <column name="transfer_sandbox" type="boolean"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="20261028150000-order-transfer-paid-backfill" author="cpn">
+        <sql>
+            update shipment_order set transfer_paid_at = (
+                select max(i.paid_at) from onepay_invoice i
+                where i.purpose = 'ORDER' and i.state = 'PAID'
+                  and (i.order_code = shipment_order.order_code or i.order_code = shipment_order.draft_code)
+            )
+            where transfer_paid_at is null and exists (
+                select 1 from onepay_invoice i
+                where i.purpose = 'ORDER' and i.state = 'PAID'
+                  and (i.order_code = shipment_order.order_code or i.order_code = shipment_order.draft_code)
+            )
+        </sql>
+    </changeSet>
+
+    <changeSet id="20261028150000-order-transfer-sandbox-backfill" author="cpn">
+        <comment>Đơn cũ: coi là test nếu thu hộ chưa chuyển sang PRODUCTION.</comment>
+        <sql>
+            update shipment_order set transfer_sandbox = (
+                case when exists (select 1 from onepay_config c where c.environment = 'PRODUCTION') then false else true end
+            )
+            where transfer_paid_at is not null and transfer_sandbox is null
+        </sql>
+    </changeSet>
+</databaseChangeLog>

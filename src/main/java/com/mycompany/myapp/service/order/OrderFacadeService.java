@@ -1,0 +1,3240 @@
+package com.mycompany.myapp.service.order;
+
+import com.mycompany.myapp.domain.Itinerary;
+import com.mycompany.myapp.domain.Office;
+import com.mycompany.myapp.domain.OrderEvent;
+import com.mycompany.myapp.domain.OrderGoodsPhoto;
+import com.mycompany.myapp.domain.OrderLeg;
+import com.mycompany.myapp.domain.OrderPodPhoto;
+import com.mycompany.myapp.domain.ShipmentOrder;
+import com.mycompany.myapp.domain.enumeration.ForwardStage;
+import com.mycompany.myapp.domain.enumeration.IssueStatus;
+import com.mycompany.myapp.domain.enumeration.LegStatus;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import com.mycompany.myapp.domain.enumeration.ServiceType;
+import com.mycompany.myapp.repository.ItineraryRepository;
+import com.mycompany.myapp.repository.OfficeRepository;
+import com.mycompany.myapp.repository.OrderEventRepository;
+import com.mycompany.myapp.repository.OrderGoodsPhotoRepository;
+import com.mycompany.myapp.repository.OrderIssueRepository;
+import com.mycompany.myapp.repository.OrderLegRepository;
+import com.mycompany.myapp.repository.OrderPodPhotoRepository;
+import com.mycompany.myapp.repository.ShipmentOrderRepository;
+import com.mycompany.myapp.security.SecurityUtils;
+import com.mycompany.myapp.security.StaffAccessService;
+import com.mycompany.myapp.service.OfficeItineraryPoints;
+import com.mycompany.myapp.service.config.TransitHubPolicyService;
+import com.mycompany.myapp.service.day.DayClosureGuard;
+import com.mycompany.myapp.service.dto.order.CreateDraftOrderRequest;
+import com.mycompany.myapp.service.dto.order.CreateDraftOrderResponse;
+import com.mycompany.myapp.service.dto.order.CreateOrderRequest;
+import com.mycompany.myapp.service.dto.order.LogOrderEventRequest;
+import com.mycompany.myapp.service.dto.order.MarkCodExportedRequest;
+import com.mycompany.myapp.service.dto.order.OrderDetailDTO;
+import com.mycompany.myapp.service.dto.order.OrderSummaryDTO;
+import com.mycompany.myapp.service.dto.order.OrderTransitionRequest;
+import com.mycompany.myapp.service.dto.order.OrderTransitionResponse;
+import com.mycompany.myapp.service.dto.order.PatchOrderRequest;
+import com.mycompany.myapp.service.dto.order.TrackOrderRequest;
+import com.mycompany.myapp.service.dto.order.TrackOrderResponse;
+import com.mycompany.myapp.service.invoice.InvoicePolicy;
+import com.mycompany.myapp.service.invoice.OrderDeliveredEvent;
+import com.mycompany.myapp.service.invoice.VietnamTaxCode;
+import com.mycompany.myapp.service.partner.AhamoveDispatchService;
+import com.mycompany.myapp.service.storage.StoredMedia;
+import com.mycompany.myapp.web.rest.errors.BadRequestAlertException;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+@Service
+@Transactional
+public class OrderFacadeService {
+
+    private static final String ENTITY = "order";
+
+    private final ShipmentOrderRepository shipmentOrderRepository;
+    private final OrderEventRepository orderEventRepository;
+    private final OrderPodPhotoRepository orderPodPhotoRepository;
+    private final OfficeRepository officeRepository;
+    private final OrderCodeGenerator orderCodeGenerator;
+    private final SimpleFareCalculator fareCalculator;
+    private com.mycompany.myapp.service.partner.DoorKmEstimator doorKmEstimator;
+    private final StaffAccessService staffAccessService;
+    private final OrderLegRepository orderLegRepository;
+    private final DayClosureGuard dayClosureGuard;
+    private final OrderIssueRepository orderIssueRepository;
+    private final DraftExpiryService draftExpiryService;
+    private final ApplicationEventPublisher eventPublisher;
+    private ItineraryRepository itineraryRepository;
+    private OrderGoodsPhotoRepository goodsPhotoRepository;
+    private com.mycompany.myapp.repository.OrderCodBillPhotoRepository codBillPhotoRepository;
+    private com.mycompany.myapp.service.payment.onepay.OnePayOrderCollectService onePayOrderCollectService;
+
+    static final int MAX_GOODS_PHOTO_LENGTH = 2_500_000;
+    static final int MAX_COD_BILL_PHOTOS = 5;
+
+    public OrderFacadeService(
+        ShipmentOrderRepository shipmentOrderRepository,
+        OrderEventRepository orderEventRepository,
+        OrderPodPhotoRepository orderPodPhotoRepository,
+        OfficeRepository officeRepository,
+        OrderCodeGenerator orderCodeGenerator,
+        SimpleFareCalculator fareCalculator,
+        StaffAccessService staffAccessService,
+        OrderLegRepository orderLegRepository,
+        DayClosureGuard dayClosureGuard,
+        OrderIssueRepository orderIssueRepository,
+        DraftExpiryService draftExpiryService,
+        ApplicationEventPublisher eventPublisher
+    ) {
+        this.shipmentOrderRepository = shipmentOrderRepository;
+        this.orderEventRepository = orderEventRepository;
+        this.orderPodPhotoRepository = orderPodPhotoRepository;
+        this.officeRepository = officeRepository;
+        this.orderCodeGenerator = orderCodeGenerator;
+        this.fareCalculator = fareCalculator;
+        this.staffAccessService = staffAccessService;
+        this.orderLegRepository = orderLegRepository;
+        this.dayClosureGuard = dayClosureGuard;
+        this.orderIssueRepository = orderIssueRepository;
+        this.draftExpiryService = draftExpiryService;
+        this.eventPublisher = eventPublisher;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setDoorKmEstimator(com.mycompany.myapp.service.partner.DoorKmEstimator doorKmEstimator) {
+        this.doorKmEstimator = doorKmEstimator;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setOnePayOrderCollectService(
+        com.mycompany.myapp.service.payment.onepay.OnePayOrderCollectService onePayOrderCollectService
+    ) {
+        this.onePayOrderCollectService = onePayOrderCollectService;
+    }
+
+    /** Đơn rời Chờ bàn giao → đóng VA thu hộ (ẩn QR app). */
+    public void syncCollectVa(ShipmentOrder order) {
+        if (onePayOrderCollectService == null || order == null) {
+            return;
+        }
+        try {
+            onePayOrderCollectService.syncAfterOrderChange(order);
+        } catch (RuntimeException ignored) {
+            /* không chặn thao tác vận hành nếu OnePay lỗi */
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public Page<OrderSummaryDTO> list(OrderStatus status, String fromOfficeCode, String toOfficeCode, String keyword, Pageable pageable) {
+        return list(status, fromOfficeCode, toOfficeCode, null, keyword, null, null, null, null, null, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<OrderSummaryDTO> list(
+        OrderStatus status,
+        String fromOfficeCode,
+        String toOfficeCode,
+        String receiverOfficeCode,
+        String keyword,
+        Pageable pageable
+    ) {
+        return list(status, fromOfficeCode, toOfficeCode, receiverOfficeCode, keyword, null, null, null, null, null, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<OrderSummaryDTO> list(
+        OrderStatus status,
+        String fromOfficeCode,
+        String toOfficeCode,
+        String receiverOfficeCode,
+        String keyword,
+        PaymentTerm paymentTerm,
+        String createdFrom,
+        String createdTo,
+        String routeLabel,
+        String itineraryLabel,
+        Pageable pageable
+    ) {
+        return list(
+            status,
+            fromOfficeCode,
+            toOfficeCode,
+            receiverOfficeCode,
+            keyword,
+            paymentTerm,
+            createdFrom,
+            createdTo,
+            routeLabel,
+            itineraryLabel,
+            null,
+            pageable
+        );
+    }
+
+    @Transactional(readOnly = true)
+    public Page<OrderSummaryDTO> list(
+        OrderStatus status,
+        String fromOfficeCode,
+        String toOfficeCode,
+        String receiverOfficeCode,
+        String keyword,
+        PaymentTerm paymentTerm,
+        String createdFrom,
+        String createdTo,
+        String routeLabel,
+        String itineraryLabel,
+        java.util.Collection<String> codes,
+        Pageable pageable
+    ) {
+        return list(
+            status,
+            fromOfficeCode,
+            toOfficeCode,
+            receiverOfficeCode,
+            keyword,
+            paymentTerm,
+            createdFrom,
+            createdTo,
+            routeLabel,
+            itineraryLabel,
+            codes,
+            OrderListExtra.NONE,
+            pageable
+        );
+    }
+
+    /**
+     * Bộ lọc thêm cho danh sách: {@code anyOfficeCode} = VP gửi / đến / nhận; {@code statuses} = một trong các trạng thái;
+     * {@code openOrUpdatedWithinDays} = đơn chưa kết thúc hoặc cập nhật trong N ngày gần nhất (tập làm việc của màn vận hành);
+     * {@code updatedFrom/updatedTo} = khoảng ngày cập nhật (yyyy-MM-dd, giờ VN);
+     * {@code successOfficeCode} = VP thao tác thành công (DELIVERED → VP nhận, RETURNED → VP gửi);
+     * {@code homeDelivery} = giao tận nơi;
+     * {@code searchAllOffices} = ô tìm đơn: có từ khoá thì NV thấy đơn mọi VP (danh sách nghiệp vụ vẫn theo VP);
+     * {@code cancelRequests} = đơn chờ duyệt huỷ: HIDE ẩn (trừ khi tìm theo từ khoá / mã), ONLY chỉ lấy các đơn đó.
+     */
+    public record OrderListExtra(
+        String anyOfficeCode,
+        java.util.Collection<OrderStatus> statuses,
+        Integer openOrUpdatedWithinDays,
+        String updatedFrom,
+        String updatedTo,
+        String successOfficeCode,
+        Boolean homeDelivery,
+        boolean searchAllOffices,
+        CancelRequestMode cancelRequests,
+        Boolean codOnly,
+        String phoneEndsWith,
+        String hubOfficeCode
+    ) {
+        public static final OrderListExtra NONE = new OrderListExtra(
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            false,
+            CancelRequestMode.INCLUDE,
+            null,
+            null,
+            null
+        );
+    }
+
+    public enum CancelRequestMode {
+        HIDE,
+        INCLUDE,
+        ONLY,
+    }
+
+    private static final List<OrderStatus> TERMINAL_STATUSES = List.of(OrderStatus.DELIVERED, OrderStatus.CANCELLED, OrderStatus.RETURNED);
+
+    @Transactional(readOnly = true)
+    public Page<OrderSummaryDTO> list(
+        OrderStatus status,
+        String fromOfficeCode,
+        String toOfficeCode,
+        String receiverOfficeCode,
+        String keyword,
+        PaymentTerm paymentTerm,
+        String createdFrom,
+        String createdTo,
+        String routeLabel,
+        String itineraryLabel,
+        java.util.Collection<String> codes,
+        OrderListExtra extra,
+        Pageable pageable
+    ) {
+        Specification<ShipmentOrder> spec = Specification.where(null);
+        OrderListExtra ex = extra == null ? OrderListExtra.NONE : extra;
+        if (ex.anyOfficeCode() != null && !ex.anyOfficeCode().isBlank()) {
+            String any = ex.anyOfficeCode().trim().toUpperCase();
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.equal(root.get("fromOffice").get("code"), any),
+                    cb.equal(root.get("toOffice").get("code"), any),
+                    cb.equal(receiverOfficePath(root, cb), any),
+                    cb.equal(hubOfficePath(root), any)
+                )
+            );
+        }
+        if (ex.hubOfficeCode() != null && !ex.hubOfficeCode().isBlank()) {
+            String hub = ex.hubOfficeCode().trim().toUpperCase();
+            spec = spec.and((root, q, cb) -> cb.equal(hubOfficePath(root), hub));
+        }
+        if (ex.statuses() != null && !ex.statuses().isEmpty()) {
+            List<OrderStatus> wanted = ex.statuses().stream().filter(java.util.Objects::nonNull).distinct().toList();
+            spec = spec.and((root, q, cb) -> root.get("status").in(wanted));
+        }
+        if (ex.openOrUpdatedWithinDays() != null && ex.openOrUpdatedWithinDays() >= 0) {
+            Instant since = Instant.now().minus(java.time.Duration.ofDays(ex.openOrUpdatedWithinDays()));
+            spec = spec.and((root, q, cb) ->
+                cb.or(cb.not(root.get("status").in(TERMINAL_STATUSES)), cb.greaterThanOrEqualTo(root.get("updatedAt"), since))
+            );
+        }
+        Instant updatedStart = parseDayStart(ex.updatedFrom());
+        Instant updatedEndExclusive = parseDayEndExclusive(ex.updatedTo());
+        if (updatedStart != null) {
+            spec = spec.and((root, q, cb) -> cb.greaterThanOrEqualTo(root.get("updatedAt"), updatedStart));
+        }
+        if (updatedEndExclusive != null) {
+            spec = spec.and((root, q, cb) -> cb.lessThan(root.get("updatedAt"), updatedEndExclusive));
+        }
+        if (ex.successOfficeCode() != null && !ex.successOfficeCode().isBlank()) {
+            String so = ex.successOfficeCode().trim().toUpperCase();
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.and(cb.equal(root.get("status"), OrderStatus.DELIVERED), cb.equal(receiverOfficePath(root, cb), so)),
+                    cb.and(cb.equal(root.get("status"), OrderStatus.RETURNED), cb.equal(root.get("fromOffice").get("code"), so))
+                )
+            );
+        }
+        if (ex.homeDelivery() != null) {
+            boolean home = ex.homeDelivery();
+            spec = spec.and((root, q, cb) ->
+                home
+                    ? cb.isTrue(root.get("homeDelivery"))
+                    : cb.or(cb.isNull(root.get("homeDelivery")), cb.isFalse(root.get("homeDelivery")))
+            );
+        }
+        if (codes != null && !codes.isEmpty()) {
+            List<String> wanted = codes.stream().filter(c -> c != null && !c.isBlank()).map(String::trim).distinct().limit(500).toList();
+            if (wanted.isEmpty()) {
+                return Page.empty(pageable);
+            }
+            spec = spec.and((root, q, cb) -> cb.or(root.get("orderCode").in(wanted), root.get("draftCode").in(wanted)));
+        }
+        if (status != null) {
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("status"), status));
+        }
+        if (Boolean.TRUE.equals(ex.codOnly()) || paymentTerm == PaymentTerm.COD) {
+            // Đơn có thu hộ / hoàn phí COD; PaymentTerm.COD chỉ còn ở đơn cũ.
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.equal(root.get("paymentTerm"), PaymentTerm.COD),
+                    cb.greaterThan(root.get("codAmount"), BigDecimal.ZERO),
+                    cb.greaterThan(root.get("codFeeRefundAmount"), BigDecimal.ZERO)
+                )
+            );
+        }
+        if (paymentTerm != null && paymentTerm != PaymentTerm.COD) {
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("paymentTerm"), paymentTerm));
+        }
+        if (fromOfficeCode != null && !fromOfficeCode.isBlank()) {
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("fromOffice").get("code"), fromOfficeCode.trim().toUpperCase()));
+        }
+        if (toOfficeCode != null && !toOfficeCode.isBlank()) {
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("toOffice").get("code"), toOfficeCode.trim().toUpperCase()));
+        }
+        if (receiverOfficeCode != null && !receiverOfficeCode.isBlank()) {
+            String receiver = receiverOfficeCode.trim().toUpperCase();
+            spec = spec.and((root, q, cb) -> cb.equal(receiverOfficePath(root, cb), receiver));
+        }
+        if (keyword != null && !keyword.isBlank()) {
+            String like = "%" + keyword.trim().toLowerCase() + "%";
+            String phone = phoneSearchDigits(keyword);
+            String phoneLike = phone != null ? "%" + phone + "%" : like;
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.like(cb.lower(root.get("orderCode")), like),
+                    cb.like(cb.lower(root.get("draftCode")), like),
+                    cb.like(cb.lower(root.get("senderPhone")), phoneLike),
+                    cb.like(cb.lower(root.get("receiverPhone")), phoneLike),
+                    cb.like(cb.lower(root.get("receiverName")), like),
+                    cb.like(cb.lower(cb.coalesce(root.get("senderName"), "")), like)
+                )
+            );
+        }
+        String phoneAffix = phoneAffixDigits(ex.phoneEndsWith());
+        if (phoneAffix != null) {
+            String ends = "%" + phoneAffix;
+            String starts = phoneAffix + "%";
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.like(root.get("senderPhone"), ends),
+                    cb.like(root.get("receiverPhone"), ends),
+                    cb.like(root.get("senderPhone"), starts),
+                    cb.like(root.get("receiverPhone"), starts)
+                )
+            );
+        }
+        Instant rangeStart = parseDayStart(createdFrom);
+        Instant rangeEndExclusive = parseDayEndExclusive(createdTo);
+        if (rangeStart != null) {
+            spec = spec.and((root, q, cb) -> cb.greaterThanOrEqualTo(root.get("createdAt"), rangeStart));
+        }
+        if (rangeEndExclusive != null) {
+            spec = spec.and((root, q, cb) -> cb.lessThan(root.get("createdAt"), rangeEndExclusive));
+        }
+        if (routeLabel != null && !routeLabel.isBlank()) {
+            String route = routeLabel.trim();
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("routeLabel"), route));
+        }
+        if (itineraryLabel != null && !itineraryLabel.isBlank()) {
+            String it = itineraryLabel.trim();
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("itineraryLabel"), it));
+        }
+        CancelRequestMode cancelMode = ex.cancelRequests() == null ? CancelRequestMode.INCLUDE : ex.cancelRequests();
+        boolean lookup = (keyword != null && !keyword.isBlank()) || phoneAffix != null || (codes != null && !codes.isEmpty());
+        if (cancelMode == CancelRequestMode.ONLY) {
+            spec = spec.and((root, q, cb) -> pendingCancelRequest(root, q, cb));
+        } else if (cancelMode == CancelRequestMode.HIDE && !lookup) {
+            spec = spec.and((root, q, cb) -> cb.not(pendingCancelRequest(root, q, cb)));
+        }
+        String scoped = staffAccessService.scopedOfficeCode().orElse(null);
+        boolean crossOfficeSearch = ex.searchAllOffices() && ((keyword != null && !keyword.isBlank()) || phoneAffix != null);
+        if (scoped != null && !crossOfficeSearch) {
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.equal(root.get("fromOffice").get("code"), scoped),
+                    cb.equal(root.get("toOffice").get("code"), scoped),
+                    cb.equal(receiverOfficePath(root, cb), scoped),
+                    cb.equal(hubOfficePath(root), scoped)
+                )
+            );
+        }
+        Page<ShipmentOrder> page = shipmentOrderRepository.findAll(spec, pageable);
+        java.util.Map<Long, List<OrderLeg>> legsByOrder = legsByOrderId(page.getContent());
+        List<Long> pageIds = page.getContent().stream().map(ShipmentOrder::getId).filter(java.util.Objects::nonNull).toList();
+        java.util.Map<Long, java.util.Map<String, Instant>> stageTimes = stageEventTimes(pageIds);
+        java.util.Set<Long> withGoodsPhoto = goodsPhotoRepository == null || pageIds.isEmpty()
+            ? java.util.Set.of()
+            : new java.util.HashSet<>(goodsPhotoRepository.findOrderIdsIn(pageIds));
+        java.util.Set<Long> withPodPhoto = orderPodPhotoRepository == null || pageIds.isEmpty()
+            ? java.util.Set.of()
+            : new java.util.HashSet<>(orderPodPhotoRepository.findOrderIdsIn(pageIds));
+        java.util.Set<Long> withCodBillPhoto = codBillPhotoRepository == null || pageIds.isEmpty()
+            ? java.util.Set.of()
+            : new java.util.HashSet<>(codBillPhotoRepository.findOrderIdsIn(pageIds));
+        java.util.Map<String, String> codProcessorNames = staffNamesByLogin(
+            page.getContent().stream().map(ShipmentOrder::getCodExportedBy).toList()
+        );
+        java.util.Map<Long, String> creators = creatorLogins(pageIds);
+        java.util.Map<String, java.util.Optional<com.mycompany.myapp.domain.StaffProfile>> creatorProfiles = new java.util.HashMap<>();
+        return page.map(o -> {
+            OrderSummaryDTO dto = new OrderSummaryDTO();
+            fillSummary(dto, o, legsByOrder.getOrDefault(o.getId(), List.of()));
+            applyCreator(dto, creators.get(o.getId()), creatorProfiles);
+            applyStageTimes(dto, stageTimes.getOrDefault(o.getId(), java.util.Map.of()));
+            dto.setHasGoodsPhoto(withGoodsPhoto.contains(o.getId()));
+            dto.setHasPodPhoto(withPodPhoto.contains(o.getId()) || !isBlank(o.getPartnerPodUrl()));
+            dto.setHasCodBillPhoto(withCodBillPhoto.contains(o.getId()));
+            if (o.getCodExportedBy() != null) {
+                dto.setCodExportedByName(codProcessorNames.get(o.getCodExportedBy().trim().toLowerCase()));
+            }
+            return dto;
+        });
+    }
+
+    private static final List<String> WAREHOUSE_IN_ACTIONS = List.of("WAREHOUSE_RECEIVE", "WH_IN", "CONFIRM", "CREATE", "TRANSIT_HUB_IN");
+    private static final List<String> TRIP_ASSIGN_ACTIONS = List.of("ASSIGN_TRIP");
+    private static final List<String> DRIVER_SIGN_ACTIONS = List.of("KY_BAN_GIAO_TAI_XE", "SCAN_OUT", "HANDOVER");
+    private static final List<String> DEST_WAREHOUSE_IN_ACTIONS = List.of("SCAN_IN", "HUB_IN", "DEST_WH_IN");
+    private static final List<String> SHIPPER_ASSIGN_ACTIONS = List.of("DELIVERING");
+    private static final List<String> STAGE_TIME_ACTIONS = java.util.stream.Stream.of(
+        WAREHOUSE_IN_ACTIONS,
+        TRIP_ASSIGN_ACTIONS,
+        DRIVER_SIGN_ACTIONS,
+        DEST_WAREHOUSE_IN_ACTIONS,
+        SHIPPER_ASSIGN_ACTIONS
+    )
+        .flatMap(List::stream)
+        .toList();
+
+    /** orderId → (ACTION → thời điểm mới nhất). */
+    private java.util.Map<Long, java.util.Map<String, Instant>> stageEventTimes(List<Long> orderIds) {
+        if (orderIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        java.util.Map<Long, java.util.Map<String, Instant>> out = new java.util.HashMap<>();
+        for (Object[] row : orderEventRepository.latestEventAtByOrderIdsAndAction(orderIds, STAGE_TIME_ACTIONS)) {
+            if (row[0] == null || row[1] == null || row[2] == null) {
+                continue;
+            }
+            out.computeIfAbsent((Long) row[0], k -> new java.util.HashMap<>()).put((String) row[1], (Instant) row[2]);
+        }
+        return out;
+    }
+
+    private static Instant latestOf(java.util.Map<String, Instant> times, List<String> actions) {
+        Instant best = null;
+        for (String a : actions) {
+            Instant t = times.get(a);
+            if (t != null && (best == null || t.isAfter(best))) {
+                best = t;
+            }
+        }
+        return best;
+    }
+
+    /** Khách tự tạo: mốc CREATE không phải nhập kho gửi. Chỉ WAREHOUSE_RECEIVE / CONFIRM mới tính. */
+    static List<String> warehouseInActions(String createdBy) {
+        if (createdBy != null && "customer".equalsIgnoreCase(createdBy.trim())) {
+            return List.of("WAREHOUSE_RECEIVE", "WH_IN", "CONFIRM", "TRANSIT_HUB_IN");
+        }
+        return WAREHOUSE_IN_ACTIONS;
+    }
+
+    private static void applyStageTimes(OrderSummaryDTO dto, java.util.Map<String, Instant> times) {
+        dto.setWarehouseInAt(latestOf(times, warehouseInActions(dto.getCreatedBy())));
+        dto.setTripAssignedAt(latestOf(times, TRIP_ASSIGN_ACTIONS));
+        dto.setDriverSignedAt(latestOf(times, DRIVER_SIGN_ACTIONS));
+        dto.setDestWarehouseInAt(latestOf(times, DEST_WAREHOUSE_IN_ACTIONS));
+        dto.setShipperAssignedAt(latestOf(times, SHIPPER_ASSIGN_ACTIONS));
+    }
+
+    private java.util.Map<Long, List<OrderLeg>> legsByOrderId(List<ShipmentOrder> orders) {
+        List<Long> ids = orders.stream().map(ShipmentOrder::getId).filter(java.util.Objects::nonNull).toList();
+        if (ids.isEmpty()) {
+            return java.util.Map.of();
+        }
+        java.util.Map<Long, List<OrderLeg>> out = new java.util.HashMap<>();
+        for (OrderLeg leg : orderLegRepository.findByOrderIdsWithTrip(ids)) {
+            out.computeIfAbsent(leg.getOrder().getId(), k -> new java.util.ArrayList<>()).add(leg);
+        }
+        return out;
+    }
+
+    /**
+     * Đơn có thu hộ: nhận biết theo tiền COD; hình thức thanh toán vẫn là người gửi / người nhận trả cước.
+     * PaymentTerm.COD chỉ còn ở đơn cũ (coi như người nhận trả cước).
+     */
+    static boolean isCodOrder(ShipmentOrder order) {
+        return (
+            order.getPaymentTerm() == PaymentTerm.COD ||
+            OrderMoney.nz(order.getCodAmount()).signum() > 0 ||
+            OrderMoney.nz(order.getCodFeeRefundAmount()).signum() > 0
+        );
+    }
+
+    public int markCodExported(MarkCodExportedRequest req) {
+        if (req == null || req.getOrderCodes() == null || req.getOrderCodes().isEmpty()) {
+            throw new BadRequestAlertException("orderCodes required", ENTITY, "orderCodesRequired");
+        }
+        Instant now = Instant.now();
+        int updated = 0;
+        for (String code : req.getOrderCodes()) {
+            if (code == null || code.isBlank()) {
+                continue;
+            }
+            ShipmentOrder order = shipmentOrderRepository.findOneByOrderCodeOrDraftCode(code.trim()).orElse(null);
+            if (order == null) {
+                continue;
+            }
+            if (!isCodOrder(order)) {
+                continue;
+            }
+            if (order.getStatus() != OrderStatus.DELIVERED || order.getCodExportedAt() != null) {
+                continue;
+            }
+            String actor = currentActor();
+            order.setCodExportedAt(now);
+            order.setCodExportedBy(actor);
+            shipmentOrderRepository.save(order);
+            BigDecimal refund = OrderMoney.nz(order.getCodFeeRefundAmount());
+            String processedDetail = refund.signum() > 0
+                ? "Xác nhận đã xử lý hoàn phí COD " + refund.toPlainString() + "đ"
+                : "Xác nhận đã xử lý COD " + OrderMoney.nz(order.getCodAmount()).toPlainString() + "đ";
+            appendEvent(order, "COD_PROCESSED", processedDetail, actor);
+            updated++;
+        }
+        return updated;
+    }
+
+    /**
+     * Từ khoá dạng SĐT ("0912 456 874", "0912.456.874", "+84912456874") → chỉ chữ số, đầu 84 đổi về 0.
+     * Không phải SĐT (có chữ cái, &lt; 3 số) → null, giữ cách so khớp cũ.
+     */
+    static String phoneSearchDigits(String keyword) {
+        if (keyword == null) return null;
+        String compact = keyword.trim().replaceAll("[\\s.\\-()]", "");
+        if (!compact.matches("\\+?\\d{3,}")) return null;
+        String digits = compact.startsWith("+") ? compact.substring(1) : compact;
+        if (digits.startsWith("84") && digits.length() >= 11) digits = "0" + digits.substring(2);
+        return digits;
+    }
+
+    /**
+     * Đúng 5 chữ số — dùng để khớp đầu hoặc cuối SĐT (gợi ý khi tạo đơn).
+     * Giá trị khác → bỏ qua, không nới thành tìm gần đúng.
+     */
+    static String phoneAffixDigits(String raw) {
+        if (raw == null) return null;
+        String digits = raw.replaceAll("\\D", "");
+        return digits.matches("\\d{5}") ? digits : null;
+    }
+
+    /** Giữ tên cũ cho test/gọi nội bộ — cùng {@link #phoneAffixDigits(String)}. */
+    static String phoneEndsWithDigits(String raw) {
+        return phoneAffixDigits(raw);
+    }
+
+    private static Instant parseDayStart(String day) {
+        if (day == null || day.isBlank()) {
+            return null;
+        }
+        LocalDate d = LocalDate.parse(day.trim());
+        return d.atStartOfDay(ZoneId.of("Asia/Ho_Chi_Minh")).toInstant();
+    }
+
+    private static Instant parseDayEndExclusive(String day) {
+        if (day == null || day.isBlank()) {
+            return null;
+        }
+        LocalDate d = LocalDate.parse(day.trim());
+        return d.plusDays(1).atStartOfDay(ZoneId.of("Asia/Ho_Chi_Minh")).toInstant();
+    }
+
+    private static jakarta.persistence.criteria.Predicate pendingCancelRequest(
+        jakarta.persistence.criteria.Root<ShipmentOrder> root,
+        jakarta.persistence.criteria.CriteriaQuery<?> q,
+        jakarta.persistence.criteria.CriteriaBuilder cb
+    ) {
+        jakarta.persistence.criteria.Subquery<Long> sub = q.subquery(Long.class);
+        jakarta.persistence.criteria.Root<com.mycompany.myapp.domain.OrderIssue> i = sub.from(com.mycompany.myapp.domain.OrderIssue.class);
+        sub
+            .select(i.get("id"))
+            .where(
+                cb.equal(i.get("order"), root),
+                cb.equal(i.get("issueType"), com.mycompany.myapp.domain.enumeration.IssueType.CANCEL_REQUEST),
+                cb.equal(i.get("issueStatus"), IssueStatus.OPEN)
+            );
+        return cb.exists(sub);
+    }
+
+    private static jakarta.persistence.criteria.Expression<String> hubOfficePath(jakarta.persistence.criteria.Root<ShipmentOrder> root) {
+        return root.join("hubOffice", jakarta.persistence.criteria.JoinType.LEFT).get("code");
+    }
+
+    /** VP nhận thật: finalToOffice khi có (đơn qua hub), ngược lại toOffice. */
+    private static jakarta.persistence.criteria.Expression<String> receiverOfficePath(
+        jakarta.persistence.criteria.Root<ShipmentOrder> root,
+        jakarta.persistence.criteria.CriteriaBuilder cb
+    ) {
+        var finalTo = root.join("finalToOffice", jakarta.persistence.criteria.JoinType.LEFT);
+        var to = root.join("toOffice", jakarta.persistence.criteria.JoinType.LEFT);
+        return cb.coalesce(finalTo.get("code"), to.get("code"));
+    }
+
+    @Transactional(readOnly = true)
+    public OrderDetailDTO getByCode(String code) {
+        ShipmentOrder order = requireByCode(code);
+        return toDetail(order);
+    }
+
+    /**
+     * Public guest create (POST /api/orders/guest, alias /drafts).
+     * Business no longer uses DRAFT: always CONFIRMED + real order code.
+     * Guest drop-off (!homePickup) → qrDropOff so đơn vào Chờ nhận hàng.
+     */
+    public CreateDraftOrderResponse createDraft(CreateDraftOrderRequest req) {
+        return createDraft(req, null);
+    }
+
+    public CreateDraftOrderResponse createDraft(CreateDraftOrderRequest req, String creatorDeviceHeader) {
+        return createDraft(req, creatorDeviceHeader, null);
+    }
+
+    /** @param ownerPhone SĐT tài khoản khách đang đăng nhập (0xxxxxxxxx), null = khách vãng lai */
+    public CreateDraftOrderResponse createDraft(CreateDraftOrderRequest req, String creatorDeviceHeader, String ownerPhone) {
+        String goodsPhoto = validGoodsPhoto(req.getGoodsPhoto());
+        boolean homeDelivery = Boolean.TRUE.equals(req.getHomeDelivery());
+        boolean homePickup = Boolean.TRUE.equals(req.getHomePickup());
+        // GTN: VP nhận = toOffice (không còn hub trung chuyển). Chấp nhận hubOfficeCode legacy làm toOffice.
+        String destOfficeCode = !isBlank(req.getToOfficeCode()) ? req.getToOfficeCode() : (homeDelivery ? req.getHubOfficeCode() : null);
+        if (homeDelivery && (isBlank(req.getDeliveryAddress()) || isBlank(destOfficeCode))) {
+            throw new BadRequestAlertException("Home delivery requires address and toOfficeCode", ENTITY, "homedelivery");
+        }
+        if (!homeDelivery && isBlank(req.getToOfficeCode())) {
+            throw new BadRequestAlertException("toOfficeCode is required when not home delivery", ENTITY, "toofficerequired");
+        }
+        if (isBlank(req.getFromOfficeCode())) {
+            throw new BadRequestAlertException("fromOfficeCode is required", ENTITY, "fromofficerequired");
+        }
+        if (homePickup && isBlank(req.getPickupAddress())) {
+            throw new BadRequestAlertException("Nhập địa chỉ lấy hàng", ENTITY, "pickupaddress");
+        }
+        if (homePickup && req.getPaymentTerm() != PaymentTerm.NHAN_TRA) {
+            throw new BadRequestAlertException("Đơn lấy tận nơi chỉ chọn người nhận thanh toán", ENTITY, "pickupReceiverPays");
+        }
+
+        String fromCode = req.getFromOfficeCode().trim().toUpperCase();
+        Office from = requireOffice(fromCode);
+        Office to = requireOffice(destOfficeCode);
+
+        // App/web đã gửi đủ cước theo kiện. Bỏ ước lượng BE (đọc cả bảng giá) để tạo đơn không chờ thêm.
+        boolean clientFare = req.getFareAmount() != null && req.getPickupFeeAmount() != null && req.getDeliveryFeeAmount() != null;
+        ShipmentOrder guestDoorProbe = new ShipmentOrder();
+        guestDoorProbe.setWeightKg(req.getEstimatedWeightKg());
+        guestDoorProbe.setNote(req.getNote());
+        SimpleFareCalculator.FareBreakdown fare = clientFare
+            ? null
+            : fareCalculator.estimate(
+                OrderPackageChargeWeight.doorChargeKg(guestDoorProbe),
+                homePickup,
+                homeDelivery,
+                from,
+                to,
+                req.getPickupKm(),
+                req.getDeliveryKm(),
+                req.getBranchCode()
+            );
+
+        // Guest public create: auto-confirm soft daily overflow (no staff dialog).
+        String orderCode = orderCodeGenerator.nextOrderCode(fromCode, true);
+
+        ShipmentOrder order = newBlankOrder();
+        order.setOrderCode(orderCode);
+        order.setStatus(OrderStatus.CONFIRMED);
+        order.setPaymentTerm(req.getPaymentTerm());
+        order.setGoodsType(req.getGoodsType());
+        order.setServiceType(resolveServiceType(homePickup, homeDelivery));
+        order.setSenderName(req.getSenderName());
+        order.setSenderPhone(req.getSenderPhone().trim());
+        order.setReceiverName(req.getReceiverName().trim());
+        order.setReceiverPhone(req.getReceiverPhone().trim());
+        order.setDeliveryAddress(req.getDeliveryAddress());
+        order.setPickupAddress(req.getPickupAddress());
+        applyDeliveryPin(order, req.getDeliveryLat(), req.getDeliveryLng());
+        order.setHomePickup(homePickup);
+        order.setHomeDelivery(homeDelivery);
+        // Khách mang hàng đến bưu cục khi không lấy tận nơi.
+        order.setQrDropOff(!homePickup);
+        order.setWeightKg(req.getEstimatedWeightKg());
+        int qty = req.getQuantity() != null && req.getQuantity() > 0 ? req.getQuantity() : 1;
+        order.setQuantity(qty);
+
+        // FE gửi tổng theo kiện → ưu tiên; không thì ước lượng BE theo cân.
+        BigDecimal fareTotal = req.getFareAmount() != null ? req.getFareAmount() : fare.total();
+        order.setFareAmount(fareTotal);
+        if (req.getGoodsFareAmount() != null) {
+            order.setGoodsFareAmount(req.getGoodsFareAmount());
+        }
+        order.setPickupFeeAmount(req.getPickupFeeAmount() != null ? req.getPickupFeeAmount() : fare.pickupFee());
+        if (homePickup && OrderMoney.nz(order.getPickupFeeAmount()).signum() <= 0) {
+            BigDecimal resolved = BigDecimal.valueOf(50_000);
+            try {
+                BigDecimal km = doorKmEstimator == null ? null : doorKmEstimator.km(from, null, null, req.getPickupAddress(), "lấy");
+                if (km != null && km.signum() > 0) {
+                    BigDecimal fromTable = fareCalculator
+                        .estimate(req.getEstimatedWeightKg(), true, homeDelivery, from, to, km, null)
+                        .pickupFee();
+                    if (fromTable != null && fromTable.signum() > 0) {
+                        resolved = fromTable;
+                    }
+                }
+            } catch (RuntimeException ex) {
+                resolved = BigDecimal.valueOf(50_000);
+            }
+            order.setPickupFeeAmount(resolved);
+            order.setFareAmount(OrderMoney.nz(order.getFareAmount()).add(resolved));
+        }
+        order.setDeliveryFeeAmount(req.getDeliveryFeeAmount() != null ? req.getDeliveryFeeAmount() : fare.deliveryFee());
+        if (req.getDeclaredFeeAmount() != null) {
+            order.setDeclaredFeeAmount(req.getDeclaredFeeAmount());
+        }
+        if (req.getDiscountAmount() != null) {
+            order.setDiscountAmount(req.getDiscountAmount());
+        }
+        if (req.getCodAmount() != null) {
+            order.setCodAmount(req.getCodAmount());
+        }
+        if (req.getCodFeeAmount() != null) {
+            order.setCodFeeAmount(req.getCodFeeAmount());
+        }
+        order.setBankName(blankToNull(req.getBankName()));
+        order.setBankAccountNo(blankToNull(req.getBankAccountNo()));
+        order.setBankAccountName(blankToNull(req.getBankAccountName()));
+        // Endpoint công khai: không tin paidAmount từ client — tiền chỉ ghi qua order_payment do nhân viên thu.
+        order.setPaidAmount(BigDecimal.ZERO);
+        order.setRouteLabel(blankToNull(req.getRouteLabel()));
+        order.setItineraryLabel(blankToNull(req.getItineraryLabel()));
+        order.setNote(req.getNote());
+        order.setFromOffice(from);
+        order.setToOffice(to);
+        order.setFinalToOffice(to);
+        applyProvinceTransit(order);
+        order.setPublicTrackingAllowed(true);
+        order.setCreatorDeviceId(normalizeCreatorDeviceId(creatorDeviceHeader));
+        order.setOwnerPhone(ownerPhone);
+        fillItineraryIfMissing(order);
+
+        order = shipmentOrderRepository.save(order);
+        ensureLegs(order);
+        appendEvent(order, "CREATE", "Tạo đơn hàng", "customer");
+        if (goodsPhoto != null && goodsPhotoRepository != null) {
+            OrderGoodsPhoto photo = new OrderGoodsPhoto();
+            photo.setOrderId(order.getId());
+            photo.setPhotoUrl(storeMedia(goodsPhoto, "goods"));
+            photo.setCapturedAt(Instant.now());
+            photo.setCapturedByUsername("customer");
+            goodsPhotoRepository.save(photo);
+            appendEvent(order, "GOODS_PHOTO", "Khách gửi ảnh đơn hàng", "customer");
+        }
+
+        return new CreateDraftOrderResponse(null, order.getOrderCode(), OrderStatus.CONFIRMED, fareTotal, null);
+    }
+
+    public OrderSummaryDTO createConfirmed(CreateOrderRequest req) {
+        if (!isBlank(req.getDraftCode())) {
+            return confirmDraft(req);
+        }
+        return createNewConfirmed(req);
+    }
+
+    public OrderTransitionResponse transition(String code, OrderTransitionRequest req) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        OrderStatus from = order.getStatus();
+        OrderStatus to = req.getToStatus();
+        if (!OrderStatusTransitions.canTransition(from, to)) {
+            throw new BadRequestAlertException("Invalid transition " + from + " -> " + to, ENTITY, "invalidtransition");
+        }
+        if (to == OrderStatus.FAILED_DELIVERY) {
+            AhamoveDispatchService.assertNoActivePartner(order);
+        }
+        if (from == OrderStatus.FAILED_DELIVERY && to == OrderStatus.DELIVERED && isBlank(req.getDetail())) {
+            throw new BadRequestAlertException(
+                "Đơn giao thất bại — nhập lý do chuyển sang giao thành công",
+                ENTITY,
+                "podFailedReasonRequired"
+            );
+        }
+        if (to == OrderStatus.CANCELLED && order.getTransferPaidAt() != null && cancelReasonTooShort(req.getDetail())) {
+            throw new BadRequestAlertException(
+                "Đơn " + order.getOrderCode() + " khách đã chuyển khoản — nhập rõ lý do huỷ",
+                ENTITY,
+                "cancelReasonRequired"
+            );
+        }
+        if (to == OrderStatus.CANCELLED && !isBlank(req.getDetail())) {
+            order.setCancelReason(req.getDetail());
+        }
+        if (from == OrderStatus.DRAFT && to == OrderStatus.CONFIRMED) {
+            if (order.getFromOffice() == null) {
+                throw new BadRequestAlertException("fromOfficeCode is required", ENTITY, "fromofficerequired");
+            }
+            String office = order.getFromOffice().getCode();
+            if (order.getOrderCode() != null && order.getOrderCode().startsWith("N-")) {
+                order.setOrderCode(orderCodeGenerator.nextOrderCode(office, Boolean.TRUE.equals(req.getConfirmDailyOverflow())));
+            }
+        }
+        order.setStatus(to);
+        // Leave warehouse pipeline — but RETURNING keeps forwardStage (pipeline hoàn dùng chung tab kho).
+        if (to == OrderStatus.DELIVERED || to == OrderStatus.CANCELLED || to == OrderStatus.RETURNED) {
+            order.setForwardStage(null);
+        } else {
+            // Stage đi cùng trạng thái đặt ngay tại đây: gọi forward-stage song song dễ bị lần lưu này ghi đè.
+            ForwardStage synced = forwardStageFor(to, order.getForwardStage());
+            if (synced != null) {
+                order.setForwardStage(synced);
+            }
+        }
+        shipmentOrderRepository.save(order);
+        syncCollectVa(order);
+        String action = isBlank(req.getAction()) ? "TRANSITION_" + to.name() : req.getAction();
+        appendEvent(order, action, req.getDetail(), currentActor());
+        if (to == OrderStatus.DELIVERED) {
+            eventPublisher.publishEvent(new OrderDeliveredEvent(order.getOrderCode()));
+        }
+        if (to == OrderStatus.AT_DEST) {
+            onArrivedAtDest(order, action);
+        }
+        return new OrderTransitionResponse(true, to, order.getOrderCode());
+    }
+
+    static final int MIN_CANCEL_REASON = 10;
+
+    /** Lý do huỷ đơn đã chuyển khoản quá ngắn; chỉ xét phần sau " · " cuối (bỏ tiền tố màn huỷ). */
+    public static boolean cancelReasonTooShort(String detail) {
+        if (detail == null) {
+            return true;
+        }
+        int sep = detail.lastIndexOf(" · ");
+        String reason = sep >= 0 ? detail.substring(sep + 3) : detail;
+        return reason.trim().length() < MIN_CANCEL_REASON;
+    }
+
+    /** Tab pipeline bắt buộc theo trạng thái mới; null = giữ nguyên. */
+    static ForwardStage forwardStageFor(OrderStatus to, ForwardStage current) {
+        return switch (to) {
+            case OUT_FOR_DELIVERY -> ForwardStage.DELIVERING;
+            case FAILED_DELIVERY -> current == ForwardStage.FAILED || current == ForwardStage.REDELIVER_WAIT ? null : ForwardStage.FAILED;
+            case AT_DEST -> ForwardStage.DEST_WH_IN;
+            default -> null;
+        };
+    }
+
+    public OrderTransitionResponse restore(String code) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        if (order.getStatus() != OrderStatus.CANCELLED) {
+            throw new BadRequestAlertException("Only CANCELLED orders can be restored", ENTITY, "restoreinvalid");
+        }
+        order.setStatus(OrderStatus.CONFIRMED);
+        order.setCancelReason(null);
+        shipmentOrderRepository.save(order);
+        appendEvent(order, "RESTORE", "Khôi phục về đã xác nhận", currentActor());
+        return new OrderTransitionResponse(true, OrderStatus.CONFIRMED, order.getOrderCode());
+    }
+
+    /**
+     * Đơn khách do chính thiết bị này tạo thì tra cứu không tính hạn mức.
+     * Đơn khách cũ chưa gắn thiết bị: lần tra bằng đủ số điện thoại sẽ gắn thiết bị đó.
+     */
+    @Transactional
+    public boolean exemptOwnDeviceLookup(String code, String phone, String deviceHeader) {
+        String device = normalizeCreatorDeviceId(deviceHeader);
+        if (device == null || code == null || code.isBlank()) {
+            return false;
+        }
+        ShipmentOrder order = shipmentOrderRepository.findOneByOrderCodeOrDraftCode(code.trim()).orElse(null);
+        if (order == null || !Boolean.TRUE.equals(order.getPublicTrackingAllowed())) {
+            return false;
+        }
+        String saved = normalizeCreatorDeviceId(order.getCreatorDeviceId());
+        if (device.equals(saved)) {
+            return true;
+        }
+        if (saved != null) {
+            return false;
+        }
+        if (!fullPhoneMatches(phone, order.getSenderPhone(), order.getReceiverPhone())) {
+            return false;
+        }
+        if (order.getId() == null || !orderEventRepository.existsByOrder_IdAndActionAndActorUsername(order.getId(), "CREATE", "customer")) {
+            return false;
+        }
+        order.setCreatorDeviceId(device);
+        shipmentOrderRepository.save(order);
+        return true;
+    }
+
+    @Transactional(readOnly = true)
+    public TrackOrderResponse track(TrackOrderRequest req) {
+        TrackOrderResponse res = new TrackOrderResponse();
+        String code = req.getCode().trim();
+        String phone = req.getPhone().trim();
+        ShipmentOrder order = shipmentOrderRepository.findOneByOrderCodeOrDraftCode(code).orElse(null);
+        if (order == null) {
+            res.setFound(false);
+            return res;
+        }
+        boolean phoneOk = phoneMatchesSenderOrReceiver(phone, order.getSenderPhone(), order.getReceiverPhone());
+        if (!phoneOk || !Boolean.TRUE.equals(order.getPublicTrackingAllowed())) {
+            res.setFound(false);
+            return res;
+        }
+        res.setFound(true);
+        res.setOrderCode(order.getOrderCode());
+        res.setDraftCode(order.getDraftCode());
+        res.setStatus(order.getStatus());
+        res.setStatusLabel(CustomerTrackStatus.labelOf(order));
+        res.setFromOfficeCode(officeCode(order.getFromOffice()));
+        res.setToOfficeCode(officeCode(order.getToOffice()));
+        res.setReceiverName(order.getReceiverName());
+        res.setReceiverPhone(order.getReceiverPhone());
+        res.setDeliveryAddress(order.getDeliveryAddress());
+        res.setGoodsType(order.getGoodsType() != null ? order.getGoodsType().name() : null);
+        res.setNote(order.getNote());
+        res.setHomeDelivery(order.getHomeDelivery());
+        res.setHomePickup(order.getHomePickup());
+        res.setFareAmount(order.getFareAmount());
+        res.setPaidAmount(order.getPaidAmount());
+        res.setCodAmount(order.getCodAmount());
+        res.setCodRefundPaid(order.getCodExportedAt() != null);
+        res.setGoodsFareAmount(order.getGoodsFareAmount());
+        res.setDeliveryFeeAmount(order.getDeliveryFeeAmount());
+        res.setPickupFeeAmount(order.getPickupFeeAmount());
+        Office dest = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+        res.setFromOfficeName(order.getFromOffice() != null ? order.getFromOffice().getName() : null);
+        res.setToOfficeName(dest != null ? dest.getName() : null);
+        res.setRouteLabel(order.getRouteLabel());
+        res.setItineraryLabel(order.getItineraryLabel());
+        List<OrderEvent> events = order.getId() == null ? List.of() : orderEventRepository.findByOrder_IdOrderByEventAtAsc(order.getId());
+        res.setEvents(
+            events
+                .stream()
+                .filter(e -> CustomerTrackJourney.PUBLIC_EVENT_ACTIONS.contains(e.getAction()))
+                .map(e -> {
+                    OrderDetailDTO.OrderEventViewDTO v = new OrderDetailDTO.OrderEventViewDTO();
+                    v.setAt(e.getEventAt());
+                    v.setAction(e.getAction());
+                    return v;
+                })
+                .toList()
+        );
+        res.setJourney(CustomerTrackJourney.build(order, events));
+        String inv = order.getInvoiceStatus();
+        if ("ISSUED".equals(inv) || "DUPLICATE".equals(inv)) {
+            res.setInvoiceState("ISSUED");
+            res.setInvoiceNo(order.getInvoiceNo());
+        } else if ("MANUAL".equals(inv) || "PENDING".equals(inv) || "FAILED".equals(inv)) {
+            res.setInvoiceState("OFFICE");
+        } else {
+            res.setInvoiceState(Boolean.TRUE.equals(order.getInvoiceRequested()) ? "REQUESTED" : "NONE");
+        }
+        return res;
+    }
+
+    /**
+     * Public track: full phone OR last 4 digits must match sender or receiver (digits only).
+     */
+    static String normalizeCreatorDeviceId(String header) {
+        if (header == null) {
+            return null;
+        }
+        String id = header.trim().toLowerCase(Locale.ROOT);
+        return id.matches("[a-z0-9._-]{8,80}") ? id : null;
+    }
+
+    /** Đủ số điện thoại người gửi hoặc người nhận, không nhận 4 số cuối. */
+    static boolean fullPhoneMatches(String input, String senderPhone, String receiverPhone) {
+        String in = digitsOnly(input);
+        if (in.length() < 9) {
+            return false;
+        }
+        return in.equals(digitsOnly(senderPhone)) || in.equals(digitsOnly(receiverPhone));
+    }
+
+    public static boolean phoneMatchesSenderOrReceiver(String input, String senderPhone, String receiverPhone) {
+        String in = digitsOnly(input);
+        if (in.isEmpty()) {
+            return false;
+        }
+        String sender = digitsOnly(senderPhone);
+        String receiver = digitsOnly(receiverPhone);
+        if (in.length() == 4) {
+            return (!sender.isEmpty() && sender.endsWith(in)) || (!receiver.isEmpty() && receiver.endsWith(in));
+        }
+        return in.equals(sender) || in.equals(receiver);
+    }
+
+    private static String digitsOnly(String s) {
+        if (s == null || s.isBlank()) {
+            return "";
+        }
+        return s.replaceAll("\\D+", "");
+    }
+
+    private OrderSummaryDTO confirmDraft(CreateOrderRequest req) {
+        ShipmentOrder order = shipmentOrderRepository
+            .findOneByDraftCode(req.getDraftCode().trim())
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Draft not found"));
+        if (order.getStatus() != OrderStatus.DRAFT) {
+            throw new BadRequestAlertException("Order is not DRAFT", ENTITY, "notdraft");
+        }
+        if (draftExpiryService.isDraftExpired(order)) {
+            draftExpiryService.cancelExpiredDraft(order);
+            throw new BadRequestAlertException("Draft expired (>24h)", ENTITY, "draftExpired");
+        }
+        applyCreateFields(order, req);
+        String fromCode = order.getFromOffice().getCode();
+        order.setOrderCode(orderCodeGenerator.nextOrderCode(fromCode, Boolean.TRUE.equals(req.getConfirmDailyOverflow())));
+        order.setStatus(OrderStatus.CONFIRMED);
+        fillItineraryIfMissing(order);
+        order = shipmentOrderRepository.save(order);
+        ensureLegs(order);
+        appendEvent(order, "CONFIRM", "Xác nhận từ nháp", currentActor());
+        return toSummary(order);
+    }
+
+    private OrderSummaryDTO createNewConfirmed(CreateOrderRequest req) {
+        boolean homeDelivery = Boolean.TRUE.equals(req.getHomeDelivery());
+        boolean homePickup = Boolean.TRUE.equals(req.getHomePickup());
+        if (homePickup && req.getPaymentTerm() != PaymentTerm.NHAN_TRA) {
+            throw new BadRequestAlertException("Đơn lấy tận nơi chỉ chọn người nhận thanh toán", ENTITY, "pickupReceiverPays");
+        }
+        Office from = requireOffice(req.getFromOfficeCode());
+        Office to = requireOffice(req.getToOfficeCode());
+
+        // Phí tận nơi theo tổng cân tính từng kiện (max thật / DxRxC/5000); cước hàng vẫn ưu tiên fareAmount client.
+        ShipmentOrder doorProbe = new ShipmentOrder();
+        doorProbe.setWeightKg(req.getWeightKg());
+        doorProbe.setNote(req.getNote());
+        SimpleFareCalculator.FareBreakdown fare = fareCalculator.estimate(
+            OrderPackageChargeWeight.doorChargeKg(doorProbe),
+            homePickup,
+            homeDelivery,
+            from,
+            to,
+            req.getPickupKm(),
+            req.getDeliveryKm(),
+            req.getBranchCode()
+        );
+        // FE gửi tổng theo kiện (goodsFare từng dòng + phí COD/tận nơi/khai giá/giảm giá) → SoT.
+        // Không ghi đè bằng ước lượng BE theo tổng cân 1 lần — với ≥2 kiện sẽ lệch (surcharge/band).
+        // Khi không có fareAmount: bảng giá master + phí dịch vụ từ request (COD/khai giá/giảm giá).
+        BigDecimal serviceFees = OrderMoney.nz(req.getCodFeeAmount())
+            .add(OrderMoney.nz(req.getDeclaredFeeAmount()))
+            .subtract(OrderMoney.nz(req.getDiscountAmount()));
+        BigDecimal total;
+        if (req.getFareAmount() != null) {
+            total = req.getFareAmount();
+        } else {
+            total = fare.total().add(serviceFees);
+        }
+        total = total.max(BigDecimal.ZERO);
+
+        ShipmentOrder order = newBlankOrder();
+        order.setOrderCode(orderCodeGenerator.nextOrderCode(from.getCode(), Boolean.TRUE.equals(req.getConfirmDailyOverflow())));
+        order.setStatus(OrderStatus.CONFIRMED);
+        applyCreateFields(order, req);
+        order.setFromOffice(from);
+        order.setToOffice(to);
+        Office dest = !isBlank(req.getFinalToOfficeCode()) ? requireOffice(req.getFinalToOfficeCode()) : to;
+        order.setFinalToOffice(dest);
+        applyProvinceTransit(order);
+        order.setServiceType(resolveServiceType(homePickup, homeDelivery));
+        order.setFareAmount(total);
+        if (req.getGoodsFareAmount() != null) {
+            order.setGoodsFareAmount(req.getGoodsFareAmount());
+        } else if (fare.pricingRuleId() != null) {
+            order.setGoodsFareAmount(fare.base().add(OrderMoney.nz(fare.surcharge())));
+        }
+        // Ưu tiên phí tận nơi FE đã tính theo bảng /phu-phi × KM; không thì BE (có KM nếu gửi).
+        order.setPickupFeeAmount(req.getPickupFeeAmount() != null ? req.getPickupFeeAmount() : fare.pickupFee());
+        order.setDeliveryFeeAmount(req.getDeliveryFeeAmount() != null ? req.getDeliveryFeeAmount() : fare.deliveryFee());
+        order.setPublicTrackingAllowed(true);
+        fillItineraryIfMissing(order);
+
+        order = shipmentOrderRepository.save(order);
+        ensureLegs(order);
+        appendEvent(order, "CREATE", "Tạo đơn nội bộ", currentActor());
+        return toSummary(order);
+    }
+
+    public OrderDetailDTO patch(String code, PatchOrderRequest req) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        if (req == null) {
+            return getByCode(order.getOrderCode());
+        }
+        String endpointsBefore = itineraryEndpointsKey(order);
+        java.util.Map<String, String> fieldsBefore = OrderEditDiff.snapshot(order);
+        BigDecimal fareBefore = OrderMoney.nz(order.getFareAmount());
+        BigDecimal paidBefore = OrderMoney.nz(order.getPaidAmount());
+        BigDecimal codFeeBefore = OrderMoney.nz(order.getCodFeeAmount());
+        String extraPayer = extraFarePayer(req.getExtraFarePayer());
+        boolean senderPaidFullBefore = senderPaidFull(order);
+        boolean prepaidFollowsFare = senderPrepaidFollowsFare(order) && !passedTransitHub(order);
+        boolean codFeeReduced = req.getCodFeeAmount() != null && OrderMoney.nz(req.getCodFeeAmount()).compareTo(codFeeBefore) < 0;
+        if (req.getSenderName() != null) {
+            order.setSenderName(req.getSenderName());
+        }
+        if (req.getSenderPhone() != null) {
+            order.setSenderPhone(req.getSenderPhone());
+        }
+        if (req.getReceiverName() != null) {
+            order.setReceiverName(req.getReceiverName());
+        }
+        if (req.getReceiverPhone() != null) {
+            order.setReceiverPhone(req.getReceiverPhone());
+        }
+        if (req.getNote() != null) {
+            // Hàng đang ở kho VP trung chuyển: kiện quét xuống ở đây không phải nhập kho giao.
+            order.setNote(goodsAtTransitHub(order) ? stripWarehouseIn(req.getNote()) : req.getNote());
+        }
+        boolean hpBefore = Boolean.TRUE.equals(order.getHomePickup());
+        boolean hdBefore = Boolean.TRUE.equals(order.getHomeDelivery());
+        String pickupAddrBefore = order.getPickupAddress();
+        String deliveryAddrBefore = order.getDeliveryAddress();
+        if (req.getPickupAddress() != null) {
+            order.setPickupAddress(req.getPickupAddress());
+        }
+        if (req.getDeliveryAddress() != null) {
+            order.setDeliveryAddress(req.getDeliveryAddress());
+        }
+        if (req.getDeliveryLat() != null && req.getDeliveryLng() != null) {
+            applyDeliveryPin(order, req.getDeliveryLat(), req.getDeliveryLng());
+        } else if (req.getDeliveryAddress() != null && !sameText(deliveryAddrBefore, order.getDeliveryAddress())) {
+            order.setDeliveryLat(null);
+            order.setDeliveryLng(null);
+        }
+        if (req.getWeightKg() != null) {
+            order.setWeightKg(req.getWeightKg());
+        }
+        if (req.getQuantity() != null) {
+            order.setQuantity(req.getQuantity());
+        }
+        SimpleFareCalculator.FareBreakdown doorFees = null;
+        BigDecimal estimatedPickupKm = null;
+        BigDecimal estimatedDeliveryKm = null;
+        // Cờ đổi, hoặc đổi địa chỉ khi đang bật tận nơi: tính lại phí. Gửi lại cùng cờ thì giữ phí đã tính theo km.
+        if (req.getHomePickup() != null) {
+            order.setHomePickup(req.getHomePickup());
+        }
+        if (req.getHomeDelivery() != null) {
+            order.setHomeDelivery(req.getHomeDelivery());
+        }
+        boolean hp = Boolean.TRUE.equals(order.getHomePickup());
+        boolean hd = Boolean.TRUE.equals(order.getHomeDelivery());
+        boolean pickupFlagChanged = hp != hpBefore;
+        boolean deliveryFlagChanged = hd != hdBefore;
+        boolean pickupAddrChanged = !sameText(pickupAddrBefore, order.getPickupAddress());
+        boolean deliveryAddrChanged = !sameText(deliveryAddrBefore, order.getDeliveryAddress());
+        boolean recomputeDoor = pickupFlagChanged || deliveryFlagChanged || (hp && pickupAddrChanged) || (hd && deliveryAddrChanged);
+        // Đổi địa chỉ/tận nơi thì cước khách do máy tính lại bên dưới — không nhận fare client (có thể đã trừ phí ship mới).
+        // Giảm phí thu hộ COD sau khi đã thu: cho phép cước < đã thu (giữ paid, ghi hoàn phí COD).
+        if (req.getFareAmount() != null && !recomputeDoor) {
+            if (!prepaidFollowsFare && !codFeeReduced) {
+                assertFareNotBelowPaid(req.getFareAmount(), order.getPaidAmount());
+            }
+            order.setFareAmount(req.getFareAmount());
+        }
+        BigDecimal prevPickupFee = order.getPickupFeeAmount();
+        BigDecimal prevDeliveryFee = order.getDeliveryFeeAmount();
+        if (recomputeDoor) {
+            order.setServiceType(resolveServiceType(hp, hd));
+            if (hp && (pickupFlagChanged || pickupAddrChanged)) {
+                estimatedPickupKm = requireDoorKm(order.getFromOffice(), order.getPickupAddress(), "lấy");
+            }
+            if (hd && (deliveryFlagChanged || deliveryAddrChanged)) {
+                Office dest = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+                estimatedDeliveryKm = requireDoorKm(dest, order.getDeliveryAddress(), "giao");
+            }
+            BigDecimal doorKg = OrderPackageChargeWeight.doorChargeKg(order);
+            doorFees = estimatedPickupKm != null || estimatedDeliveryKm != null
+                ? fareCalculator.estimate(
+                    doorKg,
+                    hp,
+                    hd,
+                    order.getFromOffice(),
+                    order.getToOffice(),
+                    estimatedPickupKm,
+                    estimatedDeliveryKm
+                )
+                : fareCalculator.estimate(doorKg, hp, hd, order.getFromOffice(), order.getToOffice());
+            // Phía không đổi km thì giữ phí cũ — null km sẽ bị tính nhầm mức 0–4 km.
+            order.setPickupFeeAmount(hp ? (estimatedPickupKm != null ? doorFees.pickupFee() : prevPickupFee) : BigDecimal.ZERO);
+            order.setDeliveryFeeAmount(hd ? (estimatedDeliveryKm != null ? doorFees.deliveryFee() : prevDeliveryFee) : BigDecimal.ZERO);
+            // Legs: do not rebuild/wipe existing OrderLeg rows on door-flag PATCH (LEG regression safe)
+        }
+        if (req.getPickingAt() != null) {
+            order.setPickingAt(parseInstant(req.getPickingAt()));
+        }
+        if (req.getPickedUpAt() != null) {
+            order.setPickedUpAt(parseInstant(req.getPickedUpAt()));
+        }
+        if (req.getPickupStaffUsername() != null) {
+            order.setPickupStaffUsername(req.getPickupStaffUsername());
+        }
+        if (req.getPartnerCode() != null) {
+            order.setPartnerCode(req.getPartnerCode());
+        }
+        if (req.getPartnerFeeAmount() != null) {
+            order.setPartnerFeeAmount(req.getPartnerFeeAmount());
+        }
+        if (req.getFromOfficeCode() != null) {
+            order.setFromOffice(requireOffice(req.getFromOfficeCode()));
+        }
+        if (req.getToOfficeCode() != null) {
+            order.setToOffice(requireOffice(req.getToOfficeCode()));
+        }
+        // Đơn trung chuyển đã có chặng: VP trung chuyển do máy chủ quản lý (tính lại khi đổi VP gửi/nhận).
+        if (req.getHubOfficeCode() != null && !hasTransitLegs(order)) {
+            // Chuỗi rỗng = xóa hub (hết trung chuyển).
+            if (isBlank(req.getHubOfficeCode())) {
+                order.setHubOffice(null);
+            } else {
+                order.setHubOffice(requireOffice(req.getHubOfficeCode()));
+            }
+        }
+        if (req.getFinalToOfficeCode() != null) {
+            order.setFinalToOffice(requireOffice(req.getFinalToOfficeCode()));
+        }
+        if (req.getCodAmount() != null) {
+            order.setCodAmount(req.getCodAmount());
+        }
+        if (req.getCodFeeAmount() != null) {
+            order.setCodFeeAmount(req.getCodFeeAmount());
+        }
+        if (req.getGoodsFareAmount() != null) {
+            order.setGoodsFareAmount(req.getGoodsFareAmount());
+        }
+        if (req.getDeclaredFeeAmount() != null) {
+            order.setDeclaredFeeAmount(req.getDeclaredFeeAmount());
+        }
+        if (req.getDiscountAmount() != null) {
+            order.setDiscountAmount(req.getDiscountAmount());
+        }
+        BigDecimal codFeeRefundDelta = BigDecimal.ZERO;
+        if (codFeeReduced) {
+            BigDecimal fareNow = OrderMoney.nz(order.getFareAmount());
+            if (fareNow.compareTo(paidBefore) < 0) {
+                // Đã thu gồm phí thu hộ → bỏ khỏi cước: giữ đã thu + giữ số phí thu hộ (để biết hoàn bao nhiêu),
+                // COD hàng = 0, ghi tiền hoàn phí COD. Cước không còn cộng phí (COD=0 → recalc bỏ phí).
+                BigDecimal feeCut = codFeeBefore.subtract(OrderMoney.nz(order.getCodFeeAmount())).max(BigDecimal.ZERO);
+                BigDecimal overpay = paidBefore.subtract(fareNow);
+                codFeeRefundDelta = feeCut.min(overpay);
+                order.setCodAmount(BigDecimal.ZERO);
+                order.setCodFeeRefundAmount(OrderMoney.nz(order.getCodFeeRefundAmount()).add(codFeeRefundDelta));
+                // Giữ cột phí thu hộ = số cần hoàn (không để 0).
+                order.setCodFeeAmount(codFeeBefore);
+            }
+        }
+        if (doorFees != null) {
+            // Phí tận nơi cập nhật theo km Ahamove. Cước khách hạ theo phí mới.
+            // Số đã thu giữ nguyên — không hoàn, không chặn khi cước mới thấp hơn số đã thu.
+            order.setFareAmount(recalcFareAfterDoorChange(order, doorFees));
+        }
+        if (req.getBankName() != null) {
+            order.setBankName(blankToNull(req.getBankName()));
+        }
+        if (req.getBankAccountNo() != null) {
+            order.setBankAccountNo(blankToNull(req.getBankAccountNo()));
+        }
+        if (req.getBankAccountName() != null) {
+            order.setBankAccountName(blankToNull(req.getBankAccountName()));
+        }
+        applyInvoiceFields(
+            order,
+            req.getInvoiceRequested(),
+            req.getInvoiceTaxCode(),
+            req.getInvoiceCompanyName(),
+            req.getInvoiceEmail(),
+            req.getInvoiceCompanyAddress(),
+            req.getInvoiceBuyerName(),
+            req.getInvoiceBuyerIdNumber(),
+            req.getInvoiceBuyerPhone(),
+            true
+        );
+        if (req.getRouteLabel() != null) {
+            order.setRouteLabel(blankToNull(req.getRouteLabel()));
+        }
+        if (req.getItineraryLabel() != null) {
+            order.setItineraryLabel(blankToNull(req.getItineraryLabel()));
+        }
+        boolean endpointsChanged = !endpointsBefore.equals(itineraryEndpointsKey(order));
+        if (req.getRouteLabel() == null && req.getItineraryLabel() == null && endpointsChanged) {
+            refillItinerary(order);
+        }
+        if (endpointsChanged) {
+            retransitAfterEndpointChange(order);
+        }
+        if (OrderMoney.nz(order.getFareAmount()).compareTo(fareBefore) != 0) {
+            PartnerAdvance.assertNotPending(order, ENTITY);
+        }
+        BigDecimal fareAfter = OrderMoney.nz(order.getFareAmount());
+        if (extraPayer == null && senderPaidFullBefore && fareAfter.compareTo(fareBefore) > 0) {
+            throw new BadRequestAlertException(
+                "Người gửi đã trả đủ " +
+                fareBefore.toPlainString() +
+                "đ, cước mới " +
+                fareAfter.toPlainString() +
+                "đ — chọn người gửi trả thêm hay người nhận trả phần chênh.",
+                ENTITY,
+                "extraFarePayerRequired"
+            );
+        }
+        boolean extraChosen = extraPayer != null && senderPaidFullBefore && fareAfter.compareTo(fareBefore) > 0;
+        BigDecimal prepaidDelta;
+        boolean receiverTakesExtra = false;
+        if (extraChosen && EXTRA_PAYER_SENDER.equals(extraPayer)) {
+            prepaidDelta = syncSenderPrepaidToFare(order);
+        } else if (extraChosen) {
+            // Người nhận trả phần chênh = "Thu cước 1 phần": giữ số người gửi đã trả, còn lại thu khi giao.
+            prepaidDelta = BigDecimal.ZERO;
+            order.setPaymentTerm(PaymentTerm.NHAN_TRA);
+            receiverTakesExtra = true;
+        } else if (prepaidFollowsFare && fareAfter.compareTo(fareBefore) < 0 && (doorFees != null || codFeeRefundDelta.signum() > 0)) {
+            // Đổi địa chỉ / bỏ tận nơi / hoàn phí COD: không ghi khoản âm — giữ đã thu.
+            prepaidDelta = BigDecimal.ZERO;
+        } else {
+            prepaidDelta = prepaidFollowsFare ? syncSenderPrepaidToFare(order) : BigDecimal.ZERO;
+        }
+        shipmentOrderRepository.save(order);
+        if (codFeeRefundDelta.signum() > 0) {
+            appendEvent(
+                order,
+                "COD_FEE_REFUND",
+                "Hoàn phí COD " + codFeeRefundDelta.toPlainString() + "đ · giữ đã thu " + paidBefore.toPlainString() + "đ · COD = 0",
+                currentActor()
+            );
+        }
+        if (receiverTakesExtra) {
+            appendEvent(
+                order,
+                "PAYMENT_TERM_CHANGE",
+                "Cước tăng sau khi người gửi đã trả · người nhận trả phần chênh " +
+                fareAfter.subtract(OrderMoney.nz(order.getPaidAmount())).toPlainString() +
+                "đ (Thu cước 1 phần)",
+                currentActor()
+            );
+        }
+        if (prepaidDelta.signum() != 0) {
+            appendEvent(
+                order,
+                "PAYMENT",
+                NOTE_SENDER_PREPAID_ADJUST + " · " + (prepaidDelta.signum() > 0 ? "+" : "") + prepaidDelta.toPlainString() + "đ",
+                currentActor()
+            );
+        }
+        if (!Boolean.TRUE.equals(req.getSkipHistory())) {
+            String eventAction = !isBlank(req.getEventAction()) ? req.getEventAction().trim() : "PATCH";
+            String eventDetail = !isBlank(req.getEventDetail()) ? req.getEventDetail().trim() : "Cập nhật thông tin đơn";
+            if ("PATCH".equals(eventAction) || "ORDER_EDIT".equals(eventAction)) {
+                String changes = OrderEditDiff.describe(fieldsBefore, OrderEditDiff.snapshot(order));
+                if (!changes.isEmpty()) {
+                    eventDetail = changes;
+                }
+                String kmNote = doorKmNote(estimatedPickupKm, estimatedDeliveryKm);
+                if (!kmNote.isEmpty()) {
+                    eventDetail = eventDetail + " · " + kmNote;
+                }
+            }
+            appendEvent(order, eventAction, eventDetail, currentActor());
+        }
+        return getByCode(order.getOrderCode());
+    }
+
+    /**
+     * Append a history row without changing order fields.
+     * PRINT also updates labelPrintedAt / labelReprintCount.
+     */
+    public OrderDetailDTO logEvent(String code, LogOrderEventRequest req) {
+        ShipmentOrder order = requireByCode(code);
+        if (req == null || isBlank(req.getAction())) {
+            throw new BadRequestAlertException("action is required", ENTITY, "eventActionRequired");
+        }
+        String action = req.getAction().trim();
+        String detail = req.getDetail();
+        if ("PRINT".equalsIgnoreCase(action)) {
+            Instant now = Instant.now();
+            Integer prev = order.getLabelReprintCount();
+            if (order.getLabelPrintedAt() == null) {
+                order.setLabelPrintedAt(now);
+                order.setLabelReprintCount(0);
+            } else {
+                order.setLabelPrintedAt(now);
+                order.setLabelReprintCount(prev == null ? 1 : prev + 1);
+            }
+            shipmentOrderRepository.save(order);
+        }
+        appendEvent(order, action, detail, currentActor());
+        return getByCode(order.getOrderCode());
+    }
+
+    public OrderDetailDTO pickupStart(String code) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        if (order.getPickingAt() == null) {
+            order.setPickingAt(Instant.now());
+        }
+        if (order.getPickupStaffUsername() == null) {
+            order.setPickupStaffUsername(currentActor());
+        }
+        shipmentOrderRepository.save(order);
+        appendEvent(order, "PICKUP_START", "Bắt đầu lấy hàng", currentActor());
+        return getByCode(order.getOrderCode());
+    }
+
+    public OrderDetailDTO warehouseReceive(String code) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        if (order.getStatus() == OrderStatus.DRAFT) {
+            if (order.getFromOffice() == null) {
+                throw new BadRequestAlertException("fromOffice is required", ENTITY, "fromofficerequired");
+            }
+            if (draftExpiryService.isDraftExpired(order)) {
+                draftExpiryService.cancelExpiredDraft(order);
+                throw new BadRequestAlertException("Draft expired (>24h)", ENTITY, "draftExpired");
+            }
+            String office = order.getFromOffice().getCode();
+            if (order.getOrderCode() != null && order.getOrderCode().startsWith("N-")) {
+                order.setOrderCode(orderCodeGenerator.nextOrderCode(office, false));
+            }
+            order.setStatus(OrderStatus.CONFIRMED);
+            ensureLegs(order);
+            appendEvent(order, "CONFIRM", "Xác nhận nhập kho tại bưu cục", currentActor());
+        }
+        order.setPickedUpAt(Instant.now());
+        if (order.getForwardStage() == null) {
+            order.setForwardStage(ForwardStage.WH_IN);
+        }
+        shipmentOrderRepository.save(order);
+        syncCollectVa(order);
+        appendEvent(order, "WAREHOUSE_RECEIVE", "Nhập kho gửi", currentActor());
+        collectSenderFareOnWarehouseIn(order);
+        return getByCode(order.getOrderCode());
+    }
+
+    public OrderDetailDTO advanceLeg(String code) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        java.util.List<OrderLeg> legs = ensureLegs(order);
+        if (legs.isEmpty()) {
+            throw new BadRequestAlertException("Order has no legs to advance", ENTITY, "noLegs");
+        }
+        OrderLeg current = legs
+            .stream()
+            .filter(l -> l.getStatus() == LegStatus.PENDING || l.getStatus() == LegStatus.IN_TRANSIT)
+            .findFirst()
+            .orElse(null);
+        if (current == null) {
+            throw new BadRequestAlertException("No pending leg", ENTITY, "noPendingLeg");
+        }
+        Instant now = Instant.now();
+        boolean last = current.getLegIndex() != null && current.getLegIndex() >= legs.size() - 1;
+        current.setArrivedAt(now);
+        current.setStatus(last ? LegStatus.AT_DEST : LegStatus.AT_HUB);
+        orderLegRepository.save(current);
+        if (last) {
+            order.setStatus(OrderStatus.AT_DEST);
+            appendEvent(order, "LEG_ARRIVE_DEST", "Chặng cuối đã đến", currentActor());
+            onArrivedAtDest(order, "LEG_ARRIVE_DEST");
+        } else {
+            OrderLeg next = legs.get(current.getLegIndex() + 1);
+            order.setFromOffice(next.getFromOffice());
+            order.setToOffice(next.getToOffice());
+            order.setCurrentTrip(null);
+            order.setStatus(OrderStatus.CONFIRMED);
+            appendEvent(order, "LEG_ADVANCE", "Chuyển sang chặng tiếp", currentActor());
+        }
+        shipmentOrderRepository.save(order);
+        return getByCode(order.getOrderCode());
+    }
+
+    private void applyCreateFields(ShipmentOrder order, CreateOrderRequest req) {
+        boolean homeDelivery = Boolean.TRUE.equals(req.getHomeDelivery());
+        boolean homePickup = Boolean.TRUE.equals(req.getHomePickup());
+        order.setPaymentTerm(req.getPaymentTerm());
+        order.setGoodsType(req.getGoodsType());
+        order.setSenderName(req.getSenderName());
+        order.setSenderPhone(req.getSenderPhone().trim());
+        order.setReceiverName(req.getReceiverName().trim());
+        order.setReceiverPhone(req.getReceiverPhone().trim());
+        order.setDeliveryAddress(req.getDeliveryAddress());
+        order.setPickupAddress(req.getPickupAddress());
+        applyDeliveryPin(order, req.getDeliveryLat(), req.getDeliveryLng());
+        order.setHomePickup(homePickup);
+        order.setHomeDelivery(homeDelivery);
+        order.setQrDropOff(Boolean.TRUE.equals(req.getQrDropOff()));
+        order.setOnCredit(Boolean.TRUE.equals(req.getOnCredit()));
+        order.setWeightKg(req.getWeightKg());
+        order.setQuantity(req.getQuantity() == null ? 1 : req.getQuantity());
+        order.setNote(req.getNote());
+        if (!isBlank(req.getFromOfficeCode())) {
+            order.setFromOffice(requireOffice(req.getFromOfficeCode()));
+        }
+        if (!isBlank(req.getToOfficeCode())) {
+            order.setToOffice(requireOffice(req.getToOfficeCode()));
+        }
+        // Bỏ ghi hub trên create — không còn trung chuyển.
+        order.setHubOffice(null);
+        if (!isBlank(req.getFinalToOfficeCode())) {
+            order.setFinalToOffice(requireOffice(req.getFinalToOfficeCode()));
+        }
+        if (req.getFareAmount() != null) {
+            order.setFareAmount(req.getFareAmount());
+        }
+        if (req.getCodAmount() != null) {
+            order.setCodAmount(req.getCodAmount());
+        }
+        if (req.getCodFeeAmount() != null) {
+            order.setCodFeeAmount(req.getCodFeeAmount());
+        }
+        if (req.getGoodsFareAmount() != null) {
+            order.setGoodsFareAmount(req.getGoodsFareAmount());
+        }
+        if (req.getDeclaredFeeAmount() != null) {
+            order.setDeclaredFeeAmount(req.getDeclaredFeeAmount());
+        }
+        if (req.getDiscountAmount() != null) {
+            order.setDiscountAmount(req.getDiscountAmount());
+        }
+        if (req.getBankName() != null) {
+            order.setBankName(blankToNull(req.getBankName()));
+        }
+        if (req.getBankAccountNo() != null) {
+            order.setBankAccountNo(blankToNull(req.getBankAccountNo()));
+        }
+        if (req.getBankAccountName() != null) {
+            order.setBankAccountName(blankToNull(req.getBankAccountName()));
+        }
+        applyInvoiceFields(
+            order,
+            req.getInvoiceRequested(),
+            req.getInvoiceTaxCode(),
+            req.getInvoiceCompanyName(),
+            req.getInvoiceEmail(),
+            req.getInvoiceCompanyAddress(),
+            req.getInvoiceBuyerName(),
+            req.getInvoiceBuyerIdNumber(),
+            req.getInvoiceBuyerPhone(),
+            false
+        );
+        if (req.getRouteLabel() != null) {
+            order.setRouteLabel(blankToNull(req.getRouteLabel()));
+        }
+        if (req.getItineraryLabel() != null) {
+            order.setItineraryLabel(blankToNull(req.getItineraryLabel()));
+        }
+    }
+
+    @Autowired(required = false)
+    void setItineraryRepository(ItineraryRepository itineraryRepository) {
+        this.itineraryRepository = itineraryRepository;
+    }
+
+    @Autowired(required = false)
+    void setGoodsPhotoRepository(OrderGoodsPhotoRepository goodsPhotoRepository) {
+        this.goodsPhotoRepository = goodsPhotoRepository;
+    }
+
+    @Autowired(required = false)
+    void setCodBillPhotoRepository(com.mycompany.myapp.repository.OrderCodBillPhotoRepository codBillPhotoRepository) {
+        this.codBillPhotoRepository = codBillPhotoRepository;
+    }
+
+    private TransitHubPolicyService transitHubPolicyService;
+
+    @Autowired(required = false)
+    void setTransitHubPolicyService(TransitHubPolicyService transitHubPolicyService) {
+        this.transitHubPolicyService = transitHubPolicyService;
+    }
+
+    private StoredMedia storedMedia;
+
+    @Autowired(required = false)
+    void setStoredMedia(StoredMedia storedMedia) {
+        this.storedMedia = storedMedia;
+    }
+
+    private String storeMedia(String value, String folder) {
+        return storedMedia == null || value == null ? value : storedMedia.store(value, folder);
+    }
+
+    private String showMedia(String value) {
+        return storedMedia == null || value == null ? value : storedMedia.expose(value);
+    }
+
+    /** Ảnh đơn hàng khách gửi khi tạo đơn; null nếu không có. */
+    @Transactional(readOnly = true)
+    public String goodsPhoto(String code) {
+        ShipmentOrder order = requireByCode(code);
+        if (goodsPhotoRepository == null) {
+            return null;
+        }
+        return goodsPhotoRepository.findOneByOrderId(order.getId()).map(p -> showMedia(p.getPhotoUrl())).orElse(null);
+    }
+
+    /** Ảnh bill COD đã upload (có thể nhiều). */
+    @Transactional(readOnly = true)
+    public List<String> codBillPhotos(String code) {
+        staffAccessService.requireScreenRead(com.mycompany.myapp.security.ScreenKey.QUAN_LY_DON_COD);
+        ShipmentOrder order = requireByCode(code);
+        if (codBillPhotoRepository == null) {
+            return List.of();
+        }
+        return codBillPhotoRepository
+            .findByOrderIdOrderBySequenceNoAscIdAsc(order.getId())
+            .stream()
+            .map(p -> showMedia(p.getPhotoUrl()))
+            .filter(u -> u != null && !u.isBlank())
+            .toList();
+    }
+
+    /**
+     * Thêm ảnh bill COD (data-URL). Tối đa {@link #MAX_COD_BILL_PHOTOS} ảnh / đơn.
+     * @return số ảnh hiện có sau khi lưu
+     */
+    public int uploadCodBillPhotos(String code, List<String> images) {
+        staffAccessService.requireScreenWrite(com.mycompany.myapp.security.ScreenKey.QUAN_LY_DON_COD);
+        if (codBillPhotoRepository == null) {
+            throw new BadRequestAlertException("COD bill photo storage unavailable", ENTITY, "codBillUnavailable");
+        }
+        if (images == null || images.isEmpty()) {
+            throw new BadRequestAlertException("images required", ENTITY, "codBillImagesRequired");
+        }
+        ShipmentOrder order = requireByCode(code);
+        if (!isCodOrder(order)) {
+            throw new BadRequestAlertException("Not a COD order", ENTITY, "notCodOrder");
+        }
+        int existing = codBillPhotoRepository.countByOrderId(order.getId());
+        if (existing >= MAX_COD_BILL_PHOTOS) {
+            throw new BadRequestAlertException("Too many COD bill photos", ENTITY, "codBillTooMany");
+        }
+        String actor = currentActor();
+        Instant now = Instant.now();
+        int seq = existing;
+        int added = 0;
+        for (String raw : images) {
+            if (existing + added >= MAX_COD_BILL_PHOTOS) {
+                break;
+            }
+            String photo = validGoodsPhoto(raw);
+            if (photo == null) {
+                continue;
+            }
+            seq++;
+            com.mycompany.myapp.domain.OrderCodBillPhoto row = new com.mycompany.myapp.domain.OrderCodBillPhoto();
+            row.setOrderId(order.getId());
+            row.setPhotoUrl(storeMedia(photo, "cod"));
+            row.setCapturedAt(now);
+            row.setCapturedByUsername(actor);
+            row.setSequenceNo(seq);
+            codBillPhotoRepository.save(row);
+            added++;
+        }
+        if (added == 0) {
+            throw new BadRequestAlertException("No valid COD bill image", ENTITY, "codBillInvalid");
+        }
+        appendEvent(order, "COD_BILL_UPLOAD", "Upload " + added + " ảnh bill COD", actor);
+        return existing + added;
+    }
+
+    /** Ảnh từ endpoint công khai: chỉ nhận data-URL ảnh, giới hạn dung lượng. */
+    static String validGoodsPhoto(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String photo = raw.trim();
+        if (!photo.startsWith("data:image/") || !photo.contains(";base64,")) {
+            throw new BadRequestAlertException("Goods photo must be an image", ENTITY, "goodsPhotoInvalid");
+        }
+        if (photo.length() > MAX_GOODS_PHOTO_LENGTH) {
+            throw new BadRequestAlertException("Goods photo too large", ENTITY, "goodsPhotoTooLarge");
+        }
+        return photo;
+    }
+
+    private com.mycompany.myapp.repository.StaffProfileRepository staffProfileRepository;
+
+    @Autowired(required = false)
+    void setStaffProfileRepository(com.mycompany.myapp.repository.StaffProfileRepository staffProfileRepository) {
+        this.staffProfileRepository = staffProfileRepository;
+    }
+
+    private com.mycompany.myapp.repository.OrderPaymentRepository orderPaymentRepository;
+
+    @Autowired(required = false)
+    void setOrderPaymentRepository(com.mycompany.myapp.repository.OrderPaymentRepository orderPaymentRepository) {
+        this.orderPaymentRepository = orderPaymentRepository;
+    }
+
+    private com.mycompany.myapp.service.autocall.AutoCallService autoCallService;
+
+    @Autowired(required = false)
+    void setAutoCallService(com.mycompany.myapp.service.autocall.AutoCallService autoCallService) {
+        this.autoCallService = autoCallService;
+    }
+
+    private SurchargeFeeService surchargeFeeService;
+
+    @Autowired(required = false)
+    void setSurchargeFeeService(SurchargeFeeService surchargeFeeService) {
+        this.surchargeFeeService = surchargeFeeService;
+    }
+
+    private void onArrivedAtDest(ShipmentOrder order, String action) {
+        closeTransitLegs(order);
+        if (autoCallService != null) {
+            autoCallService.onArrivedAtDest(order, action);
+        }
+        if (surchargeFeeService != null) {
+            surchargeFeeService.refreshStorageFee(order);
+        }
+    }
+
+    static final String NOTE_SENDER_PREPAID = "Thu đầu gửi (người gửi thanh toán)";
+    static final String NOTE_SENDER_PREPAID_ADJUST = "Điều chỉnh thu đầu gửi theo cước sửa";
+    static final String NOTE_PAYMENT_TERM_REVERSAL = "Đảo khoản thu do đổi hình thức thanh toán";
+
+    private com.mycompany.myapp.repository.ReceiptOrderLineRepository receiptOrderLineRepository;
+
+    @Autowired(required = false)
+    void setReceiptOrderLineRepository(com.mycompany.myapp.repository.ReceiptOrderLineRepository receiptOrderLineRepository) {
+        this.receiptOrderLineRepository = receiptOrderLineRepository;
+    }
+
+    private static String paymentMethodLabel(PaymentTerm term, boolean onCredit) {
+        if (onCredit) {
+            return "Công nợ";
+        }
+        return term == PaymentTerm.GUI_TRA ? "Người gửi trả" : "Người nhận trả";
+    }
+
+    /** Đã qua nhập kho gửi: người gửi không còn ở quầy để thu cước. */
+    static boolean senderWarehouseDone(ShipmentOrder order) {
+        if (order.getPickedUpAt() != null || order.getForwardStage() != null) {
+            return true;
+        }
+        OrderStatus st = order.getStatus();
+        return (
+            st == OrderStatus.IN_TRANSIT ||
+            st == OrderStatus.AT_DEST ||
+            st == OrderStatus.OUT_FOR_DELIVERY ||
+            st == OrderStatus.FAILED_DELIVERY
+        );
+    }
+
+    /** Hàng còn nằm kho VP gửi, chưa gán xe. */
+    static boolean atSenderWarehouse(ShipmentOrder order) {
+        OrderStatus st = order.getStatus();
+        if (st != OrderStatus.CONFIRMED && st != OrderStatus.WAITING) {
+            return false;
+        }
+        if (order.getCurrentTrip() != null) {
+            return false;
+        }
+        ForwardStage stage = order.getForwardStage();
+        return stage == null || stage == ForwardStage.PICKED || stage == ForwardStage.WH_IN;
+    }
+
+    /** Từ Nhập kho giao trở đi (đang giao / giao thất bại / chờ giao lại). */
+    static boolean atReceiverSide(ShipmentOrder order) {
+        OrderStatus st = order.getStatus();
+        if (st == OrderStatus.AT_DEST || st == OrderStatus.OUT_FOR_DELIVERY || st == OrderStatus.FAILED_DELIVERY) {
+            return true;
+        }
+        ForwardStage stage = order.getForwardStage();
+        return (
+            stage == ForwardStage.DEST_WH_IN ||
+            stage == ForwardStage.DELIVERING ||
+            stage == ForwardStage.FAILED ||
+            stage == ForwardStage.REDELIVER_WAIT
+        );
+    }
+
+    /** Quầy chỉ đổi HTTT ở Chờ lấy hàng (shipper chưa nhận lấy) / Chờ nhận hàng / Nhập kho gửi (chưa gán xe). */
+    static boolean counterMayChangePaymentTerm(ShipmentOrder order) {
+        boolean notPickedUp = order.getPickedUpAt() == null && order.getForwardStage() == null;
+        if (notPickedUp) {
+            boolean picking =
+                order.getPickingAt() != null || (order.getPickupStaffUsername() != null && !order.getPickupStaffUsername().isBlank());
+            if (picking || order.getCurrentTrip() != null) {
+                return false;
+            }
+            if (order.getStatus() == OrderStatus.DRAFT) {
+                return true;
+            }
+        }
+        return atSenderWarehouse(order);
+    }
+
+    /**
+     * Đổi hình thức thanh toán. Điều phối VP gửi đổi được khi hàng còn ở kho gửi chưa gán xe (kể cả đã thu — khoản thu
+     * được đảo bằng payment âm); sau đó điều phối chỉ đổi khi đơn chưa thu đồng nào, admin đổi được cả khi đã ghi thu.
+     * Đã lên phiếu thu / đã giao / hoàn / huỷ thì không ai đổi.
+     */
+    /**
+     * Đổi VP nhận khi hàng đang nằm ở kho VP nhận (nhập kho giao / giao thất bại / chờ giao lại) vì hàng đã được chuyển
+     * tay sang VP khác. Giữ trạng thái, lộ trình và cước; chỉ admin hoặc điều phối của VP đang giữ hàng.
+     */
+    public OrderDetailDTO rerouteDestination(String code, com.mycompany.myapp.service.dto.order.RerouteDestinationRequest req) {
+        ShipmentOrder order = requireByCode(code);
+        dayClosureGuard.assertOrderMutable(order);
+        PartnerAdvance.assertNoRefundDue(order, ENTITY);
+        String reason = req == null || req.reason() == null ? "" : req.reason().trim();
+        if (reason.length() < 3) {
+            throw new BadRequestAlertException("Nhập lý do đổi VP nhận", ENTITY, "rerouteReasonRequired");
+        }
+        String targetCode = req.officeCode() == null ? "" : req.officeCode().trim();
+        if (targetCode.isEmpty()) {
+            throw new BadRequestAlertException("Chọn VP nhận mới", ENTITY, "rerouteOfficeRequired");
+        }
+        Office current = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+
+        if (!staffAccessService.isSystemAdmin()) {
+            var profile = staffAccessService
+                .current()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "Chỉ admin / điều phối được đổi VP nhận"));
+            if (profile.getRoleCode() != com.mycompany.myapp.domain.enumeration.RoleCode.AD) {
+                if (profile.getRoleCode() != com.mycompany.myapp.domain.enumeration.RoleCode.DH) {
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Chỉ admin / điều phối được đổi VP nhận");
+                }
+                String scoped = staffAccessService.scopedOfficeCode().orElse(null);
+                if (scoped != null && (current == null || !scoped.equalsIgnoreCase(current.getCode()))) {
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Chỉ điều phối VP đang giữ hàng được đổi VP nhận");
+                }
+            }
+        }
+
+        if (!rerouteAllowed(order)) {
+            throw new BadRequestAlertException(
+                "Chỉ đổi VP nhận khi hàng đang ở kho VP nhận (nhập kho giao / giao thất bại / chờ giao lại)",
+                ENTITY,
+                "rerouteStatus"
+            );
+        }
+        Office target = requireOffice(targetCode);
+        if (Boolean.FALSE.equals(target.getActive())) {
+            throw new BadRequestAlertException("VP nhận mới đã ngừng hoạt động", ENTITY, "rerouteOfficeInactive");
+        }
+        if (current != null && current.getId() != null && current.getId().equals(target.getId())) {
+            throw new BadRequestAlertException("VP nhận mới trùng VP hiện tại", ENTITY, "rerouteSameOffice");
+        }
+
+        order.setToOffice(target);
+        order.setFinalToOffice(target);
+        order.setHubOffice(null);
+        order.setPartnerCode(null);
+        order.setPartnerFeeAmount(null);
+        order.setPartnerOrderId(null);
+        order.setPartnerStatus(null);
+        shipmentOrderRepository.save(order);
+        String detail =
+            "Đổi VP nhận " + (current == null ? "—" : current.getName()) + " → " + target.getName() + " (hàng chuyển tay) · " + reason;
+        appendEvent(order, "DEST_REROUTE", detail.length() > 255 ? detail.substring(0, 255) : detail, currentActor());
+        return getByCode(order.getOrderCode());
+    }
+
+    /** Hàng đang nằm ở kho VP nhận, chưa giao cho shipper. */
+    static boolean rerouteAllowed(ShipmentOrder order) {
+        OrderStatus st = order.getStatus();
+        if (st != OrderStatus.AT_DEST && st != OrderStatus.FAILED_DELIVERY) {
+            return false;
+        }
+        return order.getForwardStage() != ForwardStage.DELIVERING;
+    }
+
+    public OrderDetailDTO changePaymentTerm(String code, com.mycompany.myapp.service.dto.order.ChangePaymentTermRequest req) {
+        ShipmentOrder order = requireByCode(code);
+        PartnerAdvance.assertNotPending(order, ENTITY);
+        String reason = req == null || req.reason() == null ? "" : req.reason().trim();
+        if (reason.length() < 3) {
+            throw new BadRequestAlertException("Nhập lý do đổi hình thức thanh toán", ENTITY, "paymentTermReasonRequired");
+        }
+        String method = req.method() == null ? "" : req.method().trim().toUpperCase();
+        PaymentTerm target;
+        boolean targetCredit;
+        switch (method) {
+            case "GUI_TRA" -> {
+                target = PaymentTerm.GUI_TRA;
+                targetCredit = false;
+            }
+            case "NHAN_TRA" -> {
+                target = PaymentTerm.NHAN_TRA;
+                targetCredit = false;
+            }
+            case "CONG_NO" -> {
+                target = PaymentTerm.GUI_TRA;
+                targetCredit = true;
+            }
+            default -> throw new BadRequestAlertException("Hình thức thanh toán không hợp lệ", ENTITY, "paymentTermInvalid");
+        }
+
+        boolean admin = staffAccessService.isSystemAdmin();
+        boolean senderOfficeStaff = admin;
+        if (!admin) {
+            var profile = staffAccessService
+                .current()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "Chỉ admin / điều phối được đổi"));
+            if (profile.getRoleCode() == com.mycompany.myapp.domain.enumeration.RoleCode.AD) {
+                admin = true;
+                senderOfficeStaff = true;
+            } else if (profile.getRoleCode() == com.mycompany.myapp.domain.enumeration.RoleCode.Q) {
+                String scoped = staffAccessService.scopedOfficeCode().orElse(null);
+                boolean ownSender =
+                    scoped != null && order.getFromOffice() != null && scoped.equalsIgnoreCase(order.getFromOffice().getCode());
+                if (!ownSender) {
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Quầy chỉ đổi được đơn của VP gửi mình");
+                }
+                if (!counterMayChangePaymentTerm(order)) {
+                    throw new BadRequestAlertException(
+                        "Quầy chỉ đổi hình thức thanh toán khi đơn ở Chờ lấy hàng / Chờ nhận hàng / Nhập kho gửi",
+                        ENTITY,
+                        "paymentTermCounterStage"
+                    );
+                }
+                senderOfficeStaff = true;
+            } else if (profile.getRoleCode() != com.mycompany.myapp.domain.enumeration.RoleCode.DH) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Chỉ admin / điều phối / quầy được đổi hình thức thanh toán");
+            } else {
+                String scoped = staffAccessService.scopedOfficeCode().orElse(null);
+                Office receiver = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+                senderOfficeStaff =
+                    scoped == null || (order.getFromOffice() != null && scoped.equalsIgnoreCase(order.getFromOffice().getCode()));
+                boolean inScope = senderOfficeStaff || (receiver != null && scoped.equalsIgnoreCase(receiver.getCode()));
+                if (!inScope) {
+                    throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Đơn không thuộc VP của bạn");
+                }
+            }
+        }
+        boolean atSenderWh = atSenderWarehouse(order) && senderOfficeStaff;
+
+        OrderStatus st = order.getStatus();
+        if (st == OrderStatus.DELIVERED || st == OrderStatus.RETURNING || st == OrderStatus.RETURNED || st == OrderStatus.CANCELLED) {
+            throw new BadRequestAlertException(
+                "Đơn đã giao / hoàn / huỷ — không đổi được hình thức thanh toán",
+                ENTITY,
+                "paymentTermLocked"
+            );
+        }
+        if (atReceiverSide(order)) {
+            throw new BadRequestAlertException(
+                "Hàng đã về VP nhận — không đổi được hình thức thanh toán",
+                ENTITY,
+                "paymentTermReceiverSide"
+            );
+        }
+        if (receiptOrderLineRepository != null && order.getId() != null && receiptOrderLineRepository.existsByOrder_Id(order.getId())) {
+            throw new BadRequestAlertException(
+                "Đơn đã lên phiếu thu — huỷ phiếu thu trước khi đổi hình thức thanh toán",
+                ENTITY,
+                "paymentTermReceipted"
+            );
+        }
+
+        PaymentTerm currentTerm = order.getPaymentTerm();
+        boolean currentCredit = Boolean.TRUE.equals(order.getOnCredit());
+        if (currentTerm == target && currentCredit == targetCredit) {
+            throw new BadRequestAlertException("Đơn đang ở hình thức này rồi", ENTITY, "paymentTermUnchanged");
+        }
+        if (target == PaymentTerm.GUI_TRA && !targetCredit && senderWarehouseDone(order) && !atSenderWh) {
+            throw new BadRequestAlertException(
+                "Đơn đã gán xe — chỉ đổi được sang Người nhận trả hoặc Công nợ",
+                ENTITY,
+                "paymentTermSenderGone"
+            );
+        }
+
+        BigDecimal paid = OrderMoney.nz(order.getPaidAmount());
+        boolean reverse = paid.signum() > 0 && !(target == PaymentTerm.GUI_TRA && !targetCredit);
+        if (paid.signum() > 0 && !admin && !atSenderWh) {
+            throw new BadRequestAlertException(
+                "Đơn đã thu " + paid.toPlainString() + "đ và đã gán xe — chỉ admin đổi được hình thức thanh toán",
+                ENTITY,
+                "paymentTermCollected"
+            );
+        }
+
+        dayClosureGuard.assertOrderMutable(order);
+        String actor = currentActor();
+        if (reverse) {
+            dayClosureGuard.assertCollectionMutable(order);
+            if (orderPaymentRepository != null) {
+                com.mycompany.myapp.domain.OrderPayment payment = new com.mycompany.myapp.domain.OrderPayment();
+                payment.setPaymentAt(Instant.now());
+                payment.setAmount(paid.negate());
+                payment.setMethod(com.mycompany.myapp.domain.enumeration.PaymentMethod.TM);
+                payment.setPaymentKind(com.mycompany.myapp.domain.enumeration.PaymentKind.TRUOC);
+                payment.setNote(NOTE_PAYMENT_TERM_REVERSAL);
+                payment.setCollectorUsername(actor);
+                payment.setOrder(order);
+                orderPaymentRepository.save(payment);
+            }
+            order.setPaidAmount(BigDecimal.ZERO);
+        }
+
+        String from = paymentMethodLabel(currentTerm, currentCredit);
+        String to = paymentMethodLabel(target, targetCredit);
+        order.setPaymentTerm(target);
+        order.setOnCredit(targetCredit);
+        shipmentOrderRepository.save(order);
+
+        StringBuilder detail = new StringBuilder("Đổi hình thức thanh toán: ").append(from).append(" → ").append(to);
+        if (reverse) {
+            detail.append(" · Đảo khoản đã thu ").append(paid.toPlainString()).append("đ");
+        }
+        detail.append(" · Lý do: ").append(reason);
+        appendEvent(order, "PAYMENT_TERM_CHANGE", detail.toString(), actor);
+        if (target == PaymentTerm.GUI_TRA && !targetCredit && (senderWarehouseDone(order) || goodsAtSenderCounter(order))) {
+            collectSenderFareOnWarehouseIn(order);
+        }
+        return getByCode(order.getOrderCode());
+    }
+
+    /**
+     * Đơn quầy tạo tại VP gửi, hàng còn nằm kho, chưa gán xe: người gửi đang ở quầy → thu được ngay.
+     * Không áp dụng đơn lấy tận nơi chưa lấy / đơn khách tự tạo chưa nhập kho (thu khi nhập kho gửi).
+     */
+    boolean goodsAtSenderCounter(ShipmentOrder order) {
+        if (!atSenderWarehouse(order)) {
+            return false;
+        }
+        if (order.getPickedUpAt() == null && Boolean.TRUE.equals(order.getHomePickup())) {
+            return false;
+        }
+        return (
+            order.getId() == null ||
+            orderEventRepository == null ||
+            !orderEventRepository.existsByOrder_IdAndActionAndActorUsername(order.getId(), "CREATE", "customer")
+        );
+    }
+
+    /** Đơn khách tự tạo phải được VP gửi xác nhận nhập kho trước khi xếp xe / quét lên xe. */
+    public void assertSenderWarehouseReceived(ShipmentOrder order) {
+        var issue = order.getIssue();
+        if (
+            issue != null &&
+            issue.getIssueStatus() == IssueStatus.OPEN &&
+            issue.getIssueType() == com.mycompany.myapp.domain.enumeration.IssueType.CANCEL_REQUEST
+        ) {
+            throw new BadRequestAlertException("Đơn " + order.getOrderCode() + " đang chờ admin duyệt huỷ", ENTITY, "cancelRequestPending");
+        }
+        if (order.getStatus() != OrderStatus.CONFIRMED && order.getStatus() != OrderStatus.WAITING) {
+            return;
+        }
+        if (order.getPickedUpAt() != null || order.getId() == null) {
+            return;
+        }
+        if (orderEventRepository.existsByOrder_IdAndActionAndActorUsername(order.getId(), "CREATE", "customer")) {
+            throw new BadRequestAlertException(
+                "Đơn " + order.getOrderCode() + " do khách tạo chưa nhập kho gửi — xác nhận nhập kho trước khi xếp xe",
+                ENTITY,
+                "notWarehouseReceived"
+            );
+        }
+    }
+
+    /**
+     * Đơn người gửi trả: VP gửi xác nhận nhập kho nghĩa là đã thu cước của người gửi → ghi khoản thu đầu gửi
+     * (người thu = người nhập kho) cho phần cước còn thiếu, để shipper không thu lại người nhận.
+     */
+    public void collectSenderFareOnWarehouseIn(ShipmentOrder order) {
+        if (orderPaymentRepository == null || order.getPaymentTerm() != PaymentTerm.GUI_TRA) {
+            return;
+        }
+        if (order.getStatus() != OrderStatus.CONFIRMED && order.getStatus() != OrderStatus.WAITING) {
+            return;
+        }
+        // Nhập kho ở VP trung chuyển không phải nhận hàng từ người gửi.
+        if (passedTransitHub(order)) {
+            return;
+        }
+        BigDecimal due = OrderMoney.collectDue(order);
+        if (due.signum() <= 0) {
+            return;
+        }
+        try {
+            dayClosureGuard.assertCollectionMutable(order);
+        } catch (RuntimeException closed) {
+            org.slf4j.LoggerFactory.getLogger(OrderFacadeService.class).warn(
+                "Skip sender prepaid for {}: collection day closed",
+                order.getOrderCode()
+            );
+            return;
+        }
+        String actor = currentActor();
+        com.mycompany.myapp.domain.OrderPayment payment = new com.mycompany.myapp.domain.OrderPayment();
+        payment.setPaymentAt(Instant.now());
+        payment.setAmount(due);
+        payment.setMethod(com.mycompany.myapp.domain.enumeration.PaymentMethod.TM);
+        payment.setPaymentKind(com.mycompany.myapp.domain.enumeration.PaymentKind.TRUOC);
+        payment.setNote(NOTE_SENDER_PREPAID);
+        payment.setCollectorUsername(actor);
+        payment.setOrder(order);
+        orderPaymentRepository.save(payment);
+        order.setPaidAmount(OrderMoney.nz(order.getPaidAmount()).add(due));
+        shipmentOrderRepository.save(order);
+        appendEvent(order, "PAYMENT", NOTE_SENDER_PREPAID + " · " + due.toPlainString() + "đ", actor);
+    }
+
+    /**
+     * Người gửi trả đủ cước, hàng còn ở kho gửi chưa lên xe: khách trả trực tiếp cho NV tại VP gửi
+     * nên sửa cước thì số đã thu đi theo cước mới (không áp H1 chặn giảm).
+     */
+    static final String EXTRA_PAYER_SENDER = "SENDER";
+    static final String EXTRA_PAYER_RECEIVER = "RECEIVER";
+
+    static String extraFarePayer(String raw) {
+        if (isBlank(raw)) {
+            return null;
+        }
+        String v = raw.trim().toUpperCase(java.util.Locale.ROOT);
+        if (!EXTRA_PAYER_SENDER.equals(v) && !EXTRA_PAYER_RECEIVER.equals(v)) {
+            throw new BadRequestAlertException("extraFarePayer phải là SENDER hoặc RECEIVER", ENTITY, "extraFarePayer");
+        }
+        return v;
+    }
+
+    /** Người gửi trả, đã trả đủ cước (không công nợ). */
+    static boolean senderPaidFull(ShipmentOrder order) {
+        if (order.getPaymentTerm() != PaymentTerm.GUI_TRA || Boolean.TRUE.equals(order.getOnCredit())) {
+            return false;
+        }
+        BigDecimal paid = OrderMoney.nz(order.getPaidAmount());
+        return paid.signum() > 0 && paid.compareTo(OrderMoney.nz(order.getFareAmount())) >= 0;
+    }
+
+    static boolean senderPrepaidFollowsFare(ShipmentOrder order) {
+        if (order.getPaymentTerm() != PaymentTerm.GUI_TRA || Boolean.TRUE.equals(order.getOnCredit())) {
+            return false;
+        }
+        if (!atSenderWarehouse(order)) {
+            return false;
+        }
+        BigDecimal paid = OrderMoney.nz(order.getPaidAmount());
+        return paid.signum() > 0 && paid.compareTo(OrderMoney.nz(order.getFareAmount())) >= 0;
+    }
+
+    /**
+     * Ghi khoản thu đầu gửi chênh (dương/âm, người thu = người sửa) để paidAmount = cước mới.
+     * Đã lên phiếu thu thì chỉ cho tăng — giảm phải hoàn tiền / hủy phiếu trước.
+     *
+     * @return số chênh đã ghi (0 nếu không đổi)
+     */
+    BigDecimal syncSenderPrepaidToFare(ShipmentOrder order) {
+        BigDecimal fare = OrderMoney.nz(order.getFareAmount());
+        BigDecimal delta = fare.subtract(OrderMoney.nz(order.getPaidAmount()));
+        if (delta.signum() == 0 || orderPaymentRepository == null) {
+            return BigDecimal.ZERO;
+        }
+        if (
+            delta.signum() < 0 &&
+            receiptOrderLineRepository != null &&
+            order.getId() != null &&
+            receiptOrderLineRepository.existsByOrder_Id(order.getId())
+        ) {
+            throw new BadRequestAlertException(
+                "Đơn đã lập phiếu thu " +
+                OrderMoney.nz(order.getPaidAmount()).toPlainString() +
+                "đ — không giảm cước được. Cần admin hoàn tiền / hủy phiếu thu trước.",
+                ENTITY,
+                "fareBelowReceipted"
+            );
+        }
+        dayClosureGuard.assertCollectionMutable(order);
+        com.mycompany.myapp.domain.OrderPayment payment = new com.mycompany.myapp.domain.OrderPayment();
+        payment.setPaymentAt(Instant.now());
+        payment.setAmount(delta);
+        payment.setMethod(com.mycompany.myapp.domain.enumeration.PaymentMethod.TM);
+        payment.setPaymentKind(com.mycompany.myapp.domain.enumeration.PaymentKind.TRUOC);
+        payment.setNote(NOTE_SENDER_PREPAID_ADJUST);
+        payment.setCollectorUsername(currentActor());
+        payment.setOrder(order);
+        orderPaymentRepository.save(payment);
+        order.setPaidAmount(fare);
+        return delta;
+    }
+
+    /**
+     * Đơn thiếu tuyến/lộ trình (FE không gửi) → suy theo mã lộ trình "{điểm VP gửi}-{điểm VP nhận}" (vd PT-HD).
+     * VP kiêm nhiều điểm thì thử theo thứ tự ưu tiên, lấy lộ trình đang bật đầu tiên.
+     * Không khớp / lộ trình tắt thì để trống như cũ.
+     */
+    void fillItineraryIfMissing(ShipmentOrder order) {
+        if (itineraryRepository == null || (!isBlank(order.getRouteLabel()) && !isBlank(order.getItineraryLabel()))) {
+            return;
+        }
+        Office from = order.getFromOffice();
+        Office to = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+        resolveItinerary(from, to).ifPresent(it -> {
+            if (isBlank(order.getItineraryLabel())) {
+                order.setItineraryLabel(blankToNull(it.getName()));
+            }
+            if (isBlank(order.getRouteLabel()) && it.getBranch() != null) {
+                order.setRouteLabel(blankToNull(it.getBranch().getName()));
+            }
+        });
+    }
+
+    /** VP gửi / VP nhận cuối quyết định lộ trình — đổi một trong hai thì lộ trình cũ không còn đúng. */
+    private static String itineraryEndpointsKey(ShipmentOrder order) {
+        Office from = order.getFromOffice();
+        Office to = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+        return (from != null ? from.getId() : null) + "->" + (to != null ? to.getId() : null);
+    }
+
+    /** Đổi VP mà client không gửi lộ trình mới: suy lại; không có lộ trình đang bật thì để trống thay vì giữ lộ sai. */
+    void refillItinerary(ShipmentOrder order) {
+        if (itineraryRepository == null) {
+            return;
+        }
+        order.setRouteLabel(null);
+        order.setItineraryLabel(null);
+        fillItineraryIfMissing(order);
+    }
+
+    private Optional<Itinerary> resolveItinerary(Office from, Office to) {
+        for (String fromPt : OfficeItineraryPoints.pointsOf(from)) {
+            for (String toPt : OfficeItineraryPoints.pointsOf(to)) {
+                Optional<Itinerary> hit = itineraryRepository
+                    .findOneByCode(fromPt + "-" + toPt)
+                    .filter(it -> !Boolean.FALSE.equals(it.getActive()));
+                if (hit.isPresent()) {
+                    return hit;
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static String blankToNull(String s) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        return t.isEmpty() ? null : t;
+    }
+
+    private ShipmentOrder newBlankOrder() {
+        ShipmentOrder order = new ShipmentOrder();
+        order.setQrDropOff(false);
+        order.setPaidAmount(BigDecimal.ZERO);
+        order.setFailCount(0);
+        order.setLabelReprintCount(0);
+        order.setPublicTrackingAllowed(true);
+        order.setInvoiceRequested(false);
+        return order;
+    }
+
+    private void applyInvoiceFields(
+        ShipmentOrder order,
+        Boolean requested,
+        String taxCode,
+        String companyName,
+        String email,
+        String address,
+        String buyerName,
+        String buyerIdNumber,
+        String buyerPhone,
+        boolean patch
+    ) {
+        if ("ISSUED".equals(order.getInvoiceStatus()) || "DUPLICATE".equals(order.getInvoiceStatus())) {
+            return;
+        }
+        if (!patch) {
+            boolean want = Boolean.TRUE.equals(requested);
+            order.setInvoiceRequested(want);
+            if (want) {
+                order.setInvoiceTaxCode(requireValidBuyerTaxCode(taxCode));
+                order.setInvoiceCompanyName(blankToNull(companyName));
+                order.setInvoiceEmail(blankToNull(email));
+                order.setInvoiceCompanyAddress(blankToNull(address));
+                order.setInvoiceBuyerName(InvoicePolicy.upperBuyerName(buyerName));
+                applyOptionalInvoiceBuyerIds(order, buyerIdNumber, buyerPhone, true);
+            } else {
+                order.setInvoiceTaxCode(null);
+                order.setInvoiceCompanyName(null);
+                order.setInvoiceEmail(null);
+                order.setInvoiceCompanyAddress(null);
+                order.setInvoiceBuyerName(null);
+                order.setInvoiceBuyerIdNumber(null);
+                order.setInvoiceBuyerPhone(null);
+            }
+            return;
+        }
+        if (requested != null) {
+            order.setInvoiceRequested(requested);
+            if (!requested) {
+                order.setInvoiceTaxCode(null);
+                order.setInvoiceCompanyName(null);
+                order.setInvoiceEmail(null);
+                order.setInvoiceCompanyAddress(null);
+                order.setInvoiceBuyerName(null);
+                order.setInvoiceBuyerIdNumber(null);
+                order.setInvoiceBuyerPhone(null);
+                return;
+            }
+        }
+        if (taxCode != null) {
+            String t = blankToNull(taxCode);
+            if (t != null || Boolean.TRUE.equals(order.getInvoiceRequested()) || Boolean.TRUE.equals(requested)) {
+                order.setInvoiceTaxCode(requireValidBuyerTaxCode(taxCode));
+            } else {
+                order.setInvoiceTaxCode(null);
+            }
+        }
+        if (companyName != null) {
+            order.setInvoiceCompanyName(blankToNull(companyName));
+        }
+        if (email != null) {
+            order.setInvoiceEmail(blankToNull(email));
+        }
+        if (address != null) {
+            order.setInvoiceCompanyAddress(blankToNull(address));
+        }
+        if (buyerName != null) {
+            order.setInvoiceBuyerName(InvoicePolicy.upperBuyerName(buyerName));
+        }
+        applyOptionalInvoiceBuyerIds(order, buyerIdNumber, buyerPhone, false);
+    }
+
+    private static void applyOptionalInvoiceBuyerIds(ShipmentOrder order, String buyerIdNumber, String buyerPhone, boolean force) {
+        try {
+            if (force || buyerIdNumber != null) {
+                order.setInvoiceBuyerIdNumber(buyerIdNumber == null ? null : InvoicePolicy.normalizeBuyerIdNumber(buyerIdNumber));
+            }
+            if (force || buyerPhone != null) {
+                order.setInvoiceBuyerPhone(buyerPhone == null ? null : InvoicePolicy.normalizeBuyerPhone(buyerPhone));
+            }
+        } catch (IllegalArgumentException e) {
+            throw new BadRequestAlertException(e.getMessage(), ENTITY, "invoiceBuyerIdsInvalid");
+        }
+    }
+
+    /** MST người mua — bắt buộc đúng checksum VN khi xuất HĐ (điền bừa bị từ chối). */
+    private static String requireValidBuyerTaxCode(String taxCode) {
+        String compact = VietnamTaxCode.compact(taxCode);
+        if (compact.isEmpty()) {
+            throw new BadRequestAlertException("Mã số thuế người mua là bắt buộc", ENTITY, "invoiceTaxRequired");
+        }
+        if (!VietnamTaxCode.isValid(compact)) {
+            throw new BadRequestAlertException(
+                "Mã số thuế không hợp lệ (sai định dạng hoặc checksum). Không gửi được sang MISA.",
+                ENTITY,
+                "invoiceTaxInvalid"
+            );
+        }
+        return VietnamTaxCode.normalize(compact);
+    }
+
+    /** Ghi 1 dòng lịch sử đơn không đổi trạng thái (vd cập nhật từ đối tác giao). */
+    public void recordEvent(ShipmentOrder order, String action, String detail, String actor) {
+        appendEvent(order, action, detail, actor);
+    }
+
+    private void appendEvent(ShipmentOrder order, String action, String detail, String actor) {
+        OrderEvent event = new OrderEvent();
+        event.setEventAt(Instant.now());
+        event.setAction(action == null ? "EVENT" : (action.length() > 100 ? action.substring(0, 100) : action));
+        if (detail != null && !detail.isBlank()) {
+            String d = detail.trim();
+            event.setDetail(d.length() > OrderEvent.DETAIL_MAX ? d.substring(0, OrderEvent.DETAIL_MAX) : d);
+        }
+        event.setActorUsername(actor == null ? "system" : actor);
+        event.setOrder(order);
+        orderEventRepository.save(event);
+    }
+
+    private ShipmentOrder requireByCode(String code) {
+        return shipmentOrderRepository
+            .findOneByOrderCodeOrDraftCode(code.trim())
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found: " + code));
+    }
+
+    private Office requireOffice(String code) {
+        return officeRepository
+            .findOneByCode(code.trim().toUpperCase())
+            .orElseThrow(() -> new BadRequestAlertException("Unknown office: " + code, ENTITY, "officeNotFound"));
+    }
+
+    private OrderSummaryDTO toSummary(ShipmentOrder o) {
+        OrderSummaryDTO dto = new OrderSummaryDTO();
+        fillSummary(dto, o);
+        applyCreator(dto, o);
+        if (o.getId() != null) {
+            applyStageTimes(dto, stageEventTimes(List.of(o.getId())).getOrDefault(o.getId(), java.util.Map.of()));
+        }
+        return dto;
+    }
+
+    private OrderDetailDTO toDetail(ShipmentOrder o) {
+        OrderDetailDTO dto = new OrderDetailDTO();
+        fillSummary(dto, o);
+        applyCreator(dto, o);
+        if (o.getId() != null) {
+            applyStageTimes(dto, stageEventTimes(List.of(o.getId())).getOrDefault(o.getId(), java.util.Map.of()));
+        }
+        dto.setCancelReason(o.getCancelReason());
+        dto.setReceiverActualName(o.getReceiverActualName());
+        dto.setReceiverActualPhone(o.getReceiverActualPhone());
+        dto.setFailCount(o.getFailCount());
+        dto.setEvents(withActorInfo(mapEvents(o.getId())));
+        List<OrderPodPhoto> podRows = orderPodPhotoRepository.findByOrder_IdOrderBySequenceNoAsc(o.getId());
+        dto.setPodPhotos(podRows.stream().map(p -> showMedia(p.getPhotoUrl())).toList());
+        dto.setPodPhotoCaptions(podRows.stream().map(p -> p.getCaption() == null ? "" : p.getCaption()).toList());
+        dto.setIssues(
+            orderIssueRepository
+                .findByOrder_IdOrderByOpenedAtAscIdAsc(o.getId())
+                .stream()
+                .map(issue -> {
+                    OrderDetailDTO.OrderIssueViewDTO view = ExceptionFacadeService.toIssueView(issue);
+                    if (view.getPhotos() != null) {
+                        view.setPhotos(view.getPhotos().stream().map(this::showMedia).toList());
+                    }
+                    return view;
+                })
+                .toList()
+        );
+        dto.setCurrentIssueId(o.getIssue() != null ? o.getIssue().getId() : null);
+        return dto;
+    }
+
+    private void fillSummary(OrderSummaryDTO dto, ShipmentOrder o) {
+        fillSummary(dto, o, null);
+        if (o.getId() != null) {
+            dto.setHasGoodsPhoto(goodsPhotoRepository != null && goodsPhotoRepository.existsByOrderId(o.getId()));
+            dto.setHasPodPhoto(
+                (orderPodPhotoRepository != null && orderPodPhotoRepository.existsByOrder_Id(o.getId())) || !isBlank(o.getPartnerPodUrl())
+            );
+            dto.setHasCodBillPhoto(codBillPhotoRepository != null && codBillPhotoRepository.existsByOrderId(o.getId()));
+        }
+    }
+
+    private void fillSummary(OrderSummaryDTO dto, ShipmentOrder o, List<OrderLeg> preloadedLegs) {
+        dto.setId(o.getId());
+        dto.setOrderCode(o.getOrderCode());
+        dto.setDraftCode(o.getDraftCode());
+        dto.setCreatedAt(o.getCreatedAt());
+        dto.setUpdatedAt(o.getUpdatedAt());
+        dto.setStatus(o.getStatus());
+        dto.setForwardStage(o.getForwardStage());
+        dto.setReturnStage(o.getReturnStage());
+        dto.setSenderName(o.getSenderName());
+        dto.setSenderPhone(o.getSenderPhone());
+        dto.setReceiverName(o.getReceiverName());
+        dto.setReceiverPhone(o.getReceiverPhone());
+        dto.setFromOfficeCode(officeCode(o.getFromOffice()));
+        dto.setToOfficeCode(officeCode(o.getToOffice()));
+        dto.setHubOfficeCode(officeCode(o.getHubOffice()));
+        dto.setFinalToOfficeCode(officeCode(o.getFinalToOffice()));
+        dto.setGoodsType(o.getGoodsType());
+        dto.setPaymentTerm(o.getPaymentTerm());
+        dto.setWeightKg(o.getWeightKg());
+        dto.setQuantity(o.getQuantity());
+        dto.setFareAmount(o.getFareAmount());
+        dto.setPaidAmount(o.getPaidAmount());
+        dto.setDueAmount(OrderMoney.collectDue(o));
+        dto.setOnCredit(Boolean.TRUE.equals(o.getOnCredit()));
+        dto.setPickupFeeAmount(o.getPickupFeeAmount());
+        dto.setDeliveryFeeAmount(o.getDeliveryFeeAmount());
+        dto.setHomePickup(o.getHomePickup());
+        dto.setHomeDelivery(o.getHomeDelivery());
+        dto.setQrDropOff(o.getQrDropOff());
+        dto.setCurrentTripCode(o.getCurrentTrip() != null ? o.getCurrentTrip().getTripCode() : null);
+        dto.setShelfNumber(o.getShelfNumber());
+        dto.setNote(o.getNote());
+        dto.setPickupAddress(o.getPickupAddress());
+        dto.setDeliveryAddress(o.getDeliveryAddress());
+        dto.setDeliveryLat(o.getDeliveryLat());
+        dto.setDeliveryLng(o.getDeliveryLng());
+        dto.setPickingAt(o.getPickingAt());
+        dto.setPickedUpAt(o.getPickedUpAt());
+        dto.setPickupStaffUsername(o.getPickupStaffUsername());
+        dto.setPartnerCode(o.getPartnerCode());
+        dto.setPartnerFeeAmount(o.getPartnerFeeAmount());
+        dto.setPartnerPayMethod(o.getPartnerPayMethod());
+        dto.setPartnerOrderId(o.getPartnerOrderId());
+        dto.setPartnerStatus(o.getPartnerStatus());
+        dto.setPartnerSubStatus(o.getPartnerSubStatus());
+        dto.setPartnerTrackingUrl(o.getPartnerTrackingUrl());
+        dto.setPartnerDriverName(o.getPartnerDriverName());
+        dto.setPartnerDriverPhone(o.getPartnerDriverPhone());
+        dto.setPartnerPodUrl(o.getPartnerPodUrl());
+        dto.setPartnerFailReason(o.getPartnerFailReason());
+        dto.setPartnerUpdatedAt(o.getPartnerUpdatedAt());
+        dto.setPartnerCodAmount(o.getPartnerCodAmount());
+        dto.setPartnerCodCollectedAt(o.getPartnerCodCollectedAt());
+        dto.setPartnerCodCollectedBy(o.getPartnerCodCollectedBy());
+        dto.setPartnerShipConfirmedBy(o.getPartnerShipConfirmedBy());
+        dto.setPartnerShipConfirmedAt(o.getPartnerShipConfirmedAt());
+        if (o.getShipper() != null) {
+            dto.setShipperId(o.getShipper().getId());
+            dto.setShipperName(o.getShipper().getFullName());
+            dto.setShipperPhone(o.getShipper().getPhone());
+        }
+        dto.setCodAmount(o.getCodAmount());
+        dto.setCodFeeAmount(o.getCodFeeAmount());
+        dto.setCodFeeRefundAmount(o.getCodFeeRefundAmount());
+        dto.setStorageFeeAmount(o.getStorageFeeAmount());
+        dto.setReturnFeeAmount(o.getReturnFeeAmount());
+        dto.setGoodsFareAmount(o.getGoodsFareAmount());
+        dto.setDeclaredFeeAmount(o.getDeclaredFeeAmount());
+        dto.setDiscountAmount(o.getDiscountAmount());
+        dto.setBankName(o.getBankName());
+        dto.setBankAccountNo(o.getBankAccountNo());
+        dto.setBankAccountName(o.getBankAccountName());
+        dto.setInvoiceRequested(Boolean.TRUE.equals(o.getInvoiceRequested()));
+        dto.setInvoiceTaxCode(o.getInvoiceTaxCode());
+        dto.setInvoiceCompanyName(o.getInvoiceCompanyName());
+        dto.setInvoiceEmail(o.getInvoiceEmail());
+        dto.setInvoiceCompanyAddress(o.getInvoiceCompanyAddress());
+        dto.setInvoiceBuyerName(o.getInvoiceBuyerName());
+        dto.setInvoiceBuyerIdNumber(o.getInvoiceBuyerIdNumber());
+        dto.setInvoiceBuyerPhone(o.getInvoiceBuyerPhone());
+        dto.setInvoiceRefId(o.getInvoiceRefId());
+        dto.setInvoiceStatus(o.getInvoiceStatus());
+        dto.setInvoiceType(com.mycompany.myapp.service.invoice.InvoicePolicy.typeOf(o));
+        dto.setInvoiceTransactionId(o.getInvoiceTransactionId());
+        dto.setInvoiceNo(o.getInvoiceNo());
+        dto.setInvoiceSeries(o.getInvoiceSeries());
+        dto.setInvoiceCode(o.getInvoiceCode());
+        dto.setInvoiceGrossAmount(o.getInvoiceGrossAmount());
+        dto.setInvoiceNetAmount(o.getInvoiceNetAmount());
+        dto.setInvoiceVatAmount(o.getInvoiceVatAmount());
+        dto.setInvoiceIssuedAt(o.getInvoiceIssuedAt());
+        dto.setInvoiceError(o.getInvoiceError());
+        dto.setRouteLabel(o.getRouteLabel());
+        dto.setItineraryLabel(o.getItineraryLabel());
+        dto.setCodExportedAt(o.getCodExportedAt());
+        dto.setCodExportedBy(o.getCodExportedBy());
+        dto.setTransferPaidAt(o.getTransferPaidAt());
+        dto.setTransferSandbox(o.getTransferSandbox());
+        if (o.getCurrentTrip() != null) {
+            if (o.getCurrentTrip().getVehicle() != null) {
+                dto.setVehiclePlate(o.getCurrentTrip().getVehicle().getPlateNumber());
+            }
+            if (o.getCurrentTrip().getDriver() != null) {
+                dto.setDriverName(o.getCurrentTrip().getDriver().getFullName());
+            }
+            dto.setDepartAt(o.getCurrentTrip().getDepartAt());
+        }
+        java.util.List<OrderLeg> legs = preloadedLegs != null
+            ? preloadedLegs
+            : o.getId() == null ? java.util.List.of() : orderLegRepository.findByOrder_IdOrderByLegIndexAsc(o.getId());
+        dto.setLegs(legs.stream().map(this::toLegView).toList());
+        dto.setCurrentLegIndex(currentLegIndex(legs));
+        if ((dto.getVehiclePlate() == null || dto.getDriverName() == null || dto.getDepartAt() == null) && !legs.isEmpty()) {
+            for (int i = legs.size() - 1; i >= 0; i--) {
+                OrderLeg leg = legs.get(i);
+                if (leg.getTrip() == null) {
+                    continue;
+                }
+                if (dto.getVehiclePlate() == null && leg.getTrip().getVehicle() != null) {
+                    dto.setVehiclePlate(leg.getTrip().getVehicle().getPlateNumber());
+                }
+                if (dto.getDriverName() == null && leg.getTrip().getDriver() != null) {
+                    dto.setDriverName(leg.getTrip().getDriver().getFullName());
+                }
+                if (dto.getDepartAt() == null && leg.getTrip().getDepartAt() != null) {
+                    dto.setDepartAt(leg.getTrip().getDepartAt());
+                }
+                if (dto.getVehiclePlate() != null && dto.getDriverName() != null && dto.getDepartAt() != null) {
+                    break;
+                }
+            }
+        }
+        if (o.getStatus() == OrderStatus.DELIVERED && o.getId() != null) {
+            // Không nhét URL/base64 ảnh vào list — FE bấm "Xem POD" mới gọi getByCode.
+            dto.setReceiverActualName(o.getReceiverActualName());
+            dto.setReceiverActualPhone(o.getReceiverActualPhone());
+        }
+        if (o.getIssue() != null && o.getIssue().getIssueStatus() == IssueStatus.OPEN) {
+            var issue = o.getIssue();
+            dto.setIssueType(issue.getIssueType() != null ? issue.getIssueType().name() : null);
+            dto.setIssueReason(issue.getReason());
+            dto.setIssueOpenedAt(issue.getOpenedAt());
+            dto.setIssueOpenedBy(issue.getOpenedByUsername());
+        }
+    }
+
+    private OrderSummaryDTO.OrderLegViewDTO toLegView(OrderLeg leg) {
+        OrderSummaryDTO.OrderLegViewDTO v = new OrderSummaryDTO.OrderLegViewDTO();
+        v.setIndex(leg.getLegIndex());
+        v.setFromOfficeCode(officeCode(leg.getFromOffice()));
+        v.setToOfficeCode(officeCode(leg.getToOffice()));
+        v.setTripCode(leg.getTrip() != null ? leg.getTrip().getTripCode() : null);
+        v.setStatus(leg.getStatus());
+        v.setDepartedAt(leg.getDepartedAt());
+        v.setArrivedAt(leg.getArrivedAt());
+        return v;
+    }
+
+    private static Integer currentLegIndex(java.util.List<OrderLeg> legs) {
+        if (legs == null || legs.isEmpty()) {
+            return null;
+        }
+        int current = 0;
+        for (int i = 0; i < legs.size(); i++) {
+            LegStatus status = legs.get(i).getStatus();
+            current = i;
+            if (status == LegStatus.PENDING || status == LegStatus.IN_TRANSIT) {
+                break;
+            }
+        }
+        return current;
+    }
+
+    private java.util.List<OrderLeg> ensureLegs(ShipmentOrder order) {
+        java.util.List<OrderLeg> existing = orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId());
+        if (!existing.isEmpty()) {
+            return existing;
+        }
+        Office from = order.getFromOffice();
+        Office to = order.getToOffice();
+        Office hub = order.getHubOffice();
+        Office dest = order.getFinalToOffice();
+        if (from == null || to == null || hub == null || dest == null || sameOffice(hub, dest)) {
+            return existing;
+        }
+        Office hopTo = sameOffice(to, hub) ? to : hub;
+        OrderLeg first = new OrderLeg();
+        first.setOrder(order);
+        first.setLegIndex(0);
+        first.setStatus(LegStatus.PENDING);
+        first.setFromOffice(from);
+        first.setToOffice(hopTo);
+        OrderLeg second = new OrderLeg();
+        second.setOrder(order);
+        second.setLegIndex(1);
+        second.setStatus(LegStatus.PENDING);
+        second.setFromOffice(hopTo);
+        second.setToOffice(dest);
+        orderLegRepository.save(first);
+        orderLegRepository.save(second);
+        return orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId());
+    }
+
+    private static boolean sameOffice(Office a, Office b) {
+        return a != null && b != null && a.getId() != null && a.getId().equals(b.getId());
+    }
+
+    /** Tuyến tỉnh đi tỉnh: gắn VP trung chuyển theo cấu hình và lộ trình chặng đầu (VP gửi → VP trung chuyển). */
+    void applyProvinceTransit(ShipmentOrder order) {
+        order.setHubOffice(null);
+        if (transitHubPolicyService == null) {
+            return;
+        }
+        Office from = order.getFromOffice();
+        Office dest = receiverOf(order);
+        Office hub = transitHubPolicyService.resolveHub(from, dest).orElse(null);
+        if (hub == null) {
+            return;
+        }
+        Itinerary first = requireTransitItinerary(from, hub);
+        requireTransitItinerary(hub, dest);
+        order.setHubOffice(hub);
+        applyItinerary(order, first);
+    }
+
+    private static Office receiverOf(ShipmentOrder order) {
+        return order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+    }
+
+    private Itinerary requireTransitItinerary(Office from, Office to) {
+        if (itineraryRepository == null) {
+            return null;
+        }
+        return resolveItinerary(from, to).orElseThrow(() ->
+            new BadRequestAlertException(
+                "Chưa có lộ trình " + officeLabel(from) + " → " + officeLabel(to) + " cho đơn trung chuyển",
+                ENTITY,
+                "transitItineraryMissing"
+            )
+        );
+    }
+
+    private static String officeLabel(Office office) {
+        if (office == null) {
+            return "?";
+        }
+        return !isBlank(office.getName()) ? office.getName().trim() : office.getCode();
+    }
+
+    private static void applyItinerary(ShipmentOrder order, Itinerary it) {
+        if (it == null) {
+            return;
+        }
+        order.setItineraryLabel(blankToNull(it.getName()));
+        order.setRouteLabel(it.getBranch() != null ? blankToNull(it.getBranch().getName()) : null);
+    }
+
+    /** Chặng đang chạy của đơn trung chuyển: chặng PENDING/IN_TRANSIT đầu tiên. */
+    OrderLeg activeTransitLeg(ShipmentOrder order) {
+        if (order == null || order.getHubOffice() == null || order.getId() == null) {
+            return null;
+        }
+        return firstOpenLeg(orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId()));
+    }
+
+    private static OrderLeg firstOpenLeg(List<OrderLeg> legs) {
+        return legs
+            .stream()
+            .filter(l -> l.getStatus() == LegStatus.PENDING || l.getStatus() == LegStatus.IN_TRANSIT)
+            .findFirst()
+            .orElse(null);
+    }
+
+    /** Hàng đã tới VP nhận cuối: các chặng còn mở của đơn trung chuyển coi như xong. */
+    private void closeTransitLegs(ShipmentOrder order) {
+        if (order.getHubOffice() == null || order.getId() == null) {
+            return;
+        }
+        Instant now = Instant.now();
+        for (OrderLeg leg : orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId())) {
+            if (leg.getStatus() == LegStatus.PENDING || leg.getStatus() == LegStatus.IN_TRANSIT) {
+                if (leg.getTrip() == null && order.getCurrentTrip() != null) {
+                    leg.setTrip(order.getCurrentTrip());
+                }
+                leg.setStatus(LegStatus.AT_DEST);
+                leg.setArrivedAt(now);
+                orderLegRepository.save(leg);
+            }
+        }
+    }
+
+    /**
+     * Bắt đầu hoàn đơn trung chuyển (trừ khi hàng còn ở kho VP gửi): hàng về VP gửi qua VP trung chuyển.
+     * Hàng ở / đang tới VP trung chuyển → chặng sau đổi thành VP trung chuyển → VP gửi.
+     * Hàng đã đi chặng sau (tới VP nhận) → thêm chặng VP nhận → VP trung chuyển → VP gửi.
+     *
+     * @return mã khôi phục khi huỷ hoàn; null = không đổi chặng (giữ luồng hoàn cũ).
+     */
+    public String prepareTransitReturn(ShipmentOrder order, boolean atOriginWarehouse) {
+        if (order.getHubOffice() == null || order.getId() == null) {
+            return null;
+        }
+        List<OrderLeg> legs = orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId());
+        if (legs.size() != 2) {
+            return null;
+        }
+        OrderLeg first = legs.get(0);
+        OrderLeg second = legs.get(1);
+        OrderLeg open = firstOpenLeg(legs);
+        if (open == first && atOriginWarehouse) {
+            return null;
+        }
+        Office origin = order.getFromOffice();
+        Office hub = order.getHubOffice();
+        ForwardStage stage = order.getForwardStage();
+        boolean secondAtHub = open == second && (stage == null || stage == ForwardStage.WH_IN || stage == ForwardStage.TRANSFER_PENDING);
+        String token;
+        if (open == first || secondAtHub) {
+            token = open == first ? "H0" : "H1";
+            if (open == first) {
+                first.setStatus(LegStatus.AT_HUB);
+                orderLegRepository.save(first);
+            }
+            second.setToOffice(origin);
+            orderLegRepository.save(second);
+        } else {
+            token = "D" + (second.getStatus() == LegStatus.AT_DEST ? "1" : "0");
+            if (second.getStatus() != LegStatus.AT_DEST) {
+                second.setStatus(LegStatus.AT_DEST);
+                orderLegRepository.save(second);
+            }
+            orderLegRepository.save(newLeg(order, 2, receiverOf(order), hub));
+            orderLegRepository.save(newLeg(order, 3, hub, origin));
+        }
+        resolveItineraryIfAny(firstOpenLeg(orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId()))).ifPresent(it ->
+            applyItinerary(order, it)
+        );
+        return token;
+    }
+
+    /** Huỷ hoàn: trả các chặng về như trước khi bấm hoàn (mã từ {@link #prepareTransitReturn}). */
+    public void revertTransitReturn(ShipmentOrder order, String token) {
+        if (token == null || order.getHubOffice() == null || order.getId() == null) {
+            return;
+        }
+        List<OrderLeg> legs = orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId());
+        if (legs.size() < 2) {
+            return;
+        }
+        OrderLeg first = legs.get(0);
+        OrderLeg second = legs.get(1);
+        if (token.startsWith("H")) {
+            if ("H0".equals(token)) {
+                first.setStatus(LegStatus.PENDING);
+                first.setArrivedAt(null);
+                orderLegRepository.save(first);
+            }
+            second.setToOffice(receiverOf(order));
+            orderLegRepository.save(second);
+        } else if (token.startsWith("D")) {
+            List<OrderLeg> extra = legs.stream().filter(l -> l.getLegIndex() != null && l.getLegIndex() >= 2).toList();
+            orderLegRepository.deleteAll(extra);
+            if ("D0".equals(token)) {
+                second.setStatus(LegStatus.PENDING);
+                second.setArrivedAt(null);
+                orderLegRepository.save(second);
+            }
+        }
+        resolveItineraryIfAny(firstOpenLeg(orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId()))).ifPresent(it ->
+            applyItinerary(order, it)
+        );
+        shipmentOrderRepository.save(order);
+    }
+
+    private Optional<Itinerary> resolveItineraryIfAny(OrderLeg leg) {
+        if (leg == null || itineraryRepository == null) {
+            return Optional.empty();
+        }
+        return resolveItinerary(leg.getFromOffice(), leg.getToOffice());
+    }
+
+    private static OrderLeg newLeg(ShipmentOrder order, int index, Office from, Office to) {
+        OrderLeg leg = new OrderLeg();
+        leg.setOrder(order);
+        leg.setLegIndex(index);
+        leg.setStatus(LegStatus.PENDING);
+        leg.setFromOffice(from);
+        leg.setToOffice(to);
+        return leg;
+    }
+
+    private boolean hasTransitLegs(ShipmentOrder order) {
+        return (
+            order.getHubOffice() != null &&
+            order.getId() != null &&
+            !orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId()).isEmpty()
+        );
+    }
+
+    /** Đơn trung chuyển đã xong chặng đầu (hàng đã rời VP gửi tới VP trung chuyển). */
+    boolean passedTransitHub(ShipmentOrder order) {
+        if (order == null || order.getHubOffice() == null || order.getId() == null) {
+            return false;
+        }
+        return orderLegRepository
+            .findByOrder_IdOrderByLegIndexAsc(order.getId())
+            .stream()
+            .anyMatch(l -> l.getStatus() != LegStatus.PENDING && l.getStatus() != LegStatus.IN_TRANSIT);
+    }
+
+    /** Hàng đang nằm trong kho VP trung chuyển, chờ xếp chặng sau. */
+    public boolean goodsAtTransitHub(ShipmentOrder order) {
+        OrderLeg leg = activeTransitLeg(order);
+        if (leg == null || !sameOffice(leg.getFromOffice(), order.getHubOffice())) {
+            return false;
+        }
+        ForwardStage stage = order.getForwardStage();
+        return stage == ForwardStage.WH_IN || stage == ForwardStage.TRANSFER_PENDING;
+    }
+
+    /** VP xếp hàng của chặng đang chạy (đơn trung chuyển); null = theo luồng thường. */
+    public String transitLoadOfficeCode(ShipmentOrder order) {
+        OrderLeg leg = activeTransitLeg(order);
+        if (leg == null || leg.getFromOffice() == null) {
+            return null;
+        }
+        // Hoàn ngay tại kho VP gửi: chặng chưa đổi, giữ luồng hoàn cũ.
+        if (order.getStatus() == OrderStatus.RETURNING && Integer.valueOf(0).equals(leg.getLegIndex())) {
+            return null;
+        }
+        return leg.getFromOffice().getCode();
+    }
+
+    /**
+     * Quét nhập đủ kiện tại VP trung chuyển: xong chặng tới VP trung chuyển, đơn vào nhập kho gửi của VP này cho chặng sau.
+     * Chiều đi về CONFIRMED (không thu cước lần nữa); chiều hoàn giữ RETURNING.
+     *
+     * @return false khi lần quét không phải hàng tới VP trung chuyển.
+     */
+    public boolean arriveAtTransitHub(String orderCode, String officeCode) {
+        if (isBlank(officeCode)) {
+            return false;
+        }
+        ShipmentOrder order = requireByCode(orderCode);
+        OrderLeg leg = activeTransitLeg(order);
+        if (leg == null || !sameOffice(leg.getToOffice(), order.getHubOffice())) {
+            return false;
+        }
+        if (!officeCode.trim().equalsIgnoreCase(order.getHubOffice().getCode())) {
+            return false;
+        }
+        boolean returning = order.getStatus() == OrderStatus.RETURNING;
+        if (!returning && order.getStatus() != OrderStatus.IN_TRANSIT && order.getStatus() != OrderStatus.WAITING) {
+            return false;
+        }
+        dayClosureGuard.assertOrderMutable(order);
+        if (leg.getTrip() == null && order.getCurrentTrip() != null) {
+            leg.setTrip(order.getCurrentTrip());
+        }
+        leg.setStatus(LegStatus.AT_HUB);
+        leg.setArrivedAt(Instant.now());
+        orderLegRepository.save(leg);
+        OrderLeg next = firstOpenLeg(orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId()));
+        if (next != null && itineraryRepository != null) {
+            resolveItinerary(next.getFromOffice(), next.getToOffice()).ifPresent(it -> applyItinerary(order, it));
+        }
+        order.setCurrentTrip(null);
+        order.setForwardStage(ForwardStage.WH_IN);
+        order.setNote(stripScanMarks(order.getNote()));
+        if (!returning) {
+            order.setStatus(OrderStatus.CONFIRMED);
+        }
+        shipmentOrderRepository.save(order);
+        appendEvent(order, TRANSIT_HUB_IN, "Nhập kho trung chuyển · VP " + order.getHubOffice().getCode(), currentActor());
+        return true;
+    }
+
+    static final String TRANSIT_HUB_IN = "TRANSIT_HUB_IN";
+
+    private static final java.util.regex.Pattern WHIN_MARK = java.util.regex.Pattern.compile("\\[WHIN\\][\\d,]*\\[/WHIN\\]\\n?");
+    private static final java.util.regex.Pattern WHOUT_MARK = java.util.regex.Pattern.compile("\\[WHOUT\\][\\d,]*\\[/WHOUT\\]\\n?");
+
+    static String stripWarehouseIn(String note) {
+        if (note == null) {
+            return null;
+        }
+        return WHIN_MARK.matcher(note).replaceAll("").trim();
+    }
+
+    /** Bỏ dấu kiện đã xếp lên xe / đã xuống kho của chặng vừa xong để chặng sau quét lại từ đầu. */
+    static String stripScanMarks(String note) {
+        if (note == null) {
+            return null;
+        }
+        String out = WHOUT_MARK.matcher(WHIN_MARK.matcher(note).replaceAll("")).replaceAll("").trim();
+        return out.isEmpty() ? null : out;
+    }
+
+    /**
+     * Đổi VP gửi / VP nhận cuối của đơn: còn ở chặng đầu thì xét lại trung chuyển từ đầu;
+     * đã qua VP trung chuyển thì chỉ cho đổi VP nhận (chặng sau đi tới VP nhận mới).
+     */
+    private void retransitAfterEndpointChange(ShipmentOrder order) {
+        if (order.getStatus() == OrderStatus.RETURNING || order.getId() == null) {
+            return;
+        }
+        List<OrderLeg> legs = orderLegRepository.findByOrder_IdOrderByLegIndexAsc(order.getId());
+        boolean pastFirstLeg = legs.stream().anyMatch(l -> l.getStatus() != LegStatus.PENDING && l.getStatus() != LegStatus.IN_TRANSIT);
+        if (pastFirstLeg) {
+            OrderLeg first = legs.get(0);
+            if (!sameOffice(first.getFromOffice(), order.getFromOffice())) {
+                throw new BadRequestAlertException("Đơn đã qua VP trung chuyển — không đổi VP gửi được", ENTITY, "transitFromLocked");
+            }
+            OrderLeg open = firstOpenLeg(legs);
+            if (open == null) {
+                return;
+            }
+            Office dest = receiverOf(order);
+            if (sameOffice(open.getFromOffice(), dest)) {
+                throw new BadRequestAlertException("VP nhận mới trùng VP trung chuyển", ENTITY, "transitDestIsHub");
+            }
+            applyItinerary(order, requireTransitItinerary(open.getFromOffice(), dest));
+            open.setToOffice(dest);
+            orderLegRepository.save(open);
+            return;
+        }
+        applyProvinceTransit(order);
+        if (!legs.isEmpty()) {
+            orderLegRepository.deleteAll(legs);
+            orderLegRepository.flush();
+        }
+        shipmentOrderRepository.save(order);
+        ensureLegs(order);
+    }
+
+    private static Instant parseInstant(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(raw.trim());
+        } catch (Exception ex) {
+            throw new BadRequestAlertException("Invalid instant: " + raw, ENTITY, "invalidInstant");
+        }
+    }
+
+    private List<OrderDetailDTO.OrderEventViewDTO> mapEvents(Long orderId) {
+        return orderEventRepository
+            .findByOrder_IdOrderByEventAtAsc(orderId)
+            .stream()
+            .map(e -> {
+                OrderDetailDTO.OrderEventViewDTO v = new OrderDetailDTO.OrderEventViewDTO();
+                v.setAt(e.getEventAt());
+                v.setAction(e.getAction());
+                v.setDetail(e.getDetail());
+                v.setBy(e.getActorUsername());
+                return v;
+            })
+            .toList();
+    }
+
+    private java.util.Map<Long, String> creatorLogins(java.util.Collection<Long> orderIds) {
+        java.util.Map<Long, String> out = new java.util.HashMap<>();
+        if (orderEventRepository == null || orderIds == null || orderIds.isEmpty()) {
+            return out;
+        }
+        for (Object[] row : orderEventRepository.creatorsByOrderIds(orderIds)) {
+            if (row[0] != null && row[1] != null) {
+                out.putIfAbsent((Long) row[0], (String) row[1]);
+            }
+        }
+        return out;
+    }
+
+    private void applyCreator(OrderSummaryDTO dto, ShipmentOrder o) {
+        if (o.getId() == null) {
+            return;
+        }
+        applyCreator(dto, creatorLogins(List.of(o.getId())).get(o.getId()), new java.util.HashMap<>());
+    }
+
+    private void applyCreator(
+        OrderSummaryDTO dto,
+        String login,
+        java.util.Map<String, java.util.Optional<com.mycompany.myapp.domain.StaffProfile>> profiles
+    ) {
+        if (login == null || login.isBlank()) {
+            return;
+        }
+        dto.setCreatedBy(login.trim());
+        if ("customer".equalsIgnoreCase(login.trim()) || staffProfileRepository == null) {
+            return;
+        }
+        profiles
+            .computeIfAbsent(login.trim().toLowerCase(), staffProfileRepository::findOneByUserLoginIgnoreCase)
+            .ifPresent(sp -> {
+                String name = sp.getDisplayName();
+                dto.setCreatedByName(name != null && !name.isBlank() ? name.trim() : null);
+                dto.setCreatedByRole(sp.getRoleCode() != null ? sp.getRoleCode().name() : null);
+            });
+    }
+
+    /** login (chữ thường) → họ tên nhân viên; tài khoản không có hồ sơ / không có tên thì bỏ qua. */
+    private java.util.Map<String, String> staffNamesByLogin(java.util.Collection<String> logins) {
+        java.util.Map<String, String> out = new java.util.HashMap<>();
+        if (staffProfileRepository == null) {
+            return out;
+        }
+        for (String raw : logins) {
+            String login = raw == null ? "" : raw.trim().toLowerCase();
+            if (login.isEmpty() || out.containsKey(login)) {
+                continue;
+            }
+            String name = staffProfileRepository
+                .findOneByUserLoginIgnoreCase(login)
+                .map(com.mycompany.myapp.domain.StaffProfile::getDisplayName)
+                .filter(n -> !n.isBlank())
+                .map(String::trim)
+                .orElse(null);
+            out.put(login, name);
+        }
+        return out;
+    }
+
+    /** Gắn mã NV + họ tên người thao tác (mỗi tài khoản tra một lần). */
+    private List<OrderDetailDTO.OrderEventViewDTO> withActorInfo(List<OrderDetailDTO.OrderEventViewDTO> events) {
+        if (staffProfileRepository == null || events.isEmpty()) {
+            return events;
+        }
+        java.util.Map<String, java.util.Optional<com.mycompany.myapp.domain.StaffProfile>> byLogin = new java.util.HashMap<>();
+        for (OrderDetailDTO.OrderEventViewDTO v : events) {
+            String login = v.getBy() == null ? "" : v.getBy().trim().toLowerCase();
+            if (login.isEmpty()) {
+                continue;
+            }
+            java.util.Optional<com.mycompany.myapp.domain.StaffProfile> p = byLogin.computeIfAbsent(
+                login,
+                staffProfileRepository::findOneByUserLoginIgnoreCase
+            );
+            p.ifPresent(sp -> {
+                v.setByStaffCode(sp.getStaffCode());
+                String name = sp.getDisplayName();
+                v.setByName(name != null && !name.isBlank() && !name.equalsIgnoreCase(sp.getUserLogin()) ? name.trim() : null);
+            });
+        }
+        return events;
+    }
+
+    /**
+    /** KM Ahamove từ VP tới địa chỉ; thiếu địa chỉ, thiếu GPS VP hoặc Ahamove lỗi thì chặn lưu. */
+    private BigDecimal requireDoorKm(Office office, String address, String label) {
+        if (doorKmEstimator == null) {
+            throw new BadRequestAlertException("Không tính được km " + label + " tận nơi", ENTITY, "doorKmEstimate");
+        }
+        return doorKmEstimator.km(office, null, null, address, label);
+    }
+
+    private static void applyDeliveryPin(ShipmentOrder order, BigDecimal lat, BigDecimal lng) {
+        if (order == null || lat == null || lng == null) {
+            return;
+        }
+        if (lat.abs().compareTo(new BigDecimal("0.0001")) < 0 && lng.abs().compareTo(new BigDecimal("0.0001")) < 0) {
+            return;
+        }
+        order.setDeliveryLat(lat.setScale(7, java.math.RoundingMode.HALF_UP));
+        order.setDeliveryLng(lng.setScale(7, java.math.RoundingMode.HALF_UP));
+    }
+
+    private static boolean sameText(String a, String b) {
+        String x = a == null ? "" : a.trim();
+        String y = b == null ? "" : b.trim();
+        return x.equals(y);
+    }
+
+    private static String doorKmNote(BigDecimal pickupKm, BigDecimal deliveryKm) {
+        StringBuilder sb = new StringBuilder();
+        if (pickupKm != null) {
+            sb.append("km lấy ").append(pickupKm.stripTrailingZeros().toPlainString());
+        }
+        if (deliveryKm != null) {
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append("km giao ").append(deliveryKm.stripTrailingZeros().toPlainString());
+        }
+        return sb.toString();
+    }
+
+    /** Cước hàng (hoặc giá bảng nếu đơn chưa lưu cước hàng) + phí tận nơi + phí COD + phí khai giá − giảm giá. */
+    static BigDecimal recalcFareAfterDoorChange(ShipmentOrder order, SimpleFareCalculator.FareBreakdown doorFees) {
+        BigDecimal goods = order.getGoodsFareAmount() != null
+            ? order.getGoodsFareAmount()
+            : OrderMoney.nz(doorFees.total()).subtract(OrderMoney.nz(doorFees.pickupFee())).subtract(OrderMoney.nz(doorFees.deliveryFee()));
+        BigDecimal codFee = OrderMoney.nz(order.getCodAmount()).signum() > 0 ? OrderMoney.nz(order.getCodFeeAmount()) : BigDecimal.ZERO;
+        return goods
+            .add(OrderMoney.nz(order.getPickupFeeAmount()))
+            .add(OrderMoney.nz(order.getDeliveryFeeAmount()))
+            .add(codFee)
+            .add(OrderMoney.nz(order.getDeclaredFeeAmount()))
+            .add(OrderMoney.nz(order.getStorageFeeAmount()))
+            .add(OrderMoney.nz(order.getReturnFeeAmount()))
+            .subtract(OrderMoney.nz(order.getDiscountAmount()))
+            .max(BigDecimal.ZERO);
+    }
+
+    /**
+     * H1: PATCH must not set fare below already-collected paidAmount.
+     * Equal is allowed; null paid is treated as zero.
+     */
+    static void assertFareNotBelowPaid(BigDecimal newFare, BigDecimal paidAmount) {
+        BigDecimal paid = OrderMoney.nz(paidAmount);
+        if (newFare.compareTo(paid) < 0) {
+            throw new BadRequestAlertException(
+                "fareAmount must be >= paidAmount (fare=" + newFare + ", paid=" + paid + ")",
+                ENTITY,
+                "fareBelowPaid"
+            );
+        }
+    }
+
+    private static ServiceType resolveServiceType(boolean homePickup, boolean homeDelivery) {
+        if (homePickup && homeDelivery) {
+            return ServiceType.HOME_TO_HOME;
+        }
+        if (homePickup) {
+            return ServiceType.HOME_TO_COUNTER;
+        }
+        if (homeDelivery) {
+            return ServiceType.COUNTER_TO_HOME;
+        }
+        return ServiceType.COUNTER_TO_COUNTER;
+    }
+
+    private static String officeCode(Office office) {
+        return office == null ? null : office.getCode();
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private static String currentActor() {
+        return SecurityUtils.getCurrentUserLogin().orElse("system");
+    }
+}

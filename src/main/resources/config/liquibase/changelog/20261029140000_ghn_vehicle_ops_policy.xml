@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261029140000-vehicle-ops-policy" author="ghn">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="vehicle_report_policy"/>
+            <not>
+                <columnExists tableName="vehicle_report_policy" columnName="late_minutes"/>
+            </not>
+        </preConditions>
+        <comment>GHN: phút muộn khi báo rời + nguồn lịch chuyến (ghi đè YAML nếu set)</comment>
+        <addColumn tableName="vehicle_report_policy">
+            <column name="late_minutes" type="int" defaultValueNumeric="5">
+                <constraints nullable="false"/>
+            </column>
+            <column name="schedule_mode" type="varchar(16)"/>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>

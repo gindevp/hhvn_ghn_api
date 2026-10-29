@@ -1,0 +1,386 @@
+package com.mycompany.myapp.service.dto.order;
+
+import com.mycompany.myapp.domain.enumeration.GoodsType;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.math.BigDecimal;
+
+public class CreateDraftOrderRequest {
+
+    @NotBlank
+    @Pattern(regexp = "^(0[35789]\\d{8}|\\+84[35789]\\d{8})$")
+    private String senderPhone;
+
+    @Size(max = 100)
+    private String senderName;
+
+    @NotBlank
+    @Size(max = 100)
+    private String receiverName;
+
+    @NotBlank
+    @Pattern(regexp = "^(0[35789]\\d{8}|\\+84[35789]\\d{8})$")
+    private String receiverPhone;
+
+    @NotNull
+    private GoodsType goodsType;
+
+    @NotNull
+    private PaymentTerm paymentTerm;
+
+    /** Mid-point kg from FE weight band (optional). */
+    private BigDecimal estimatedWeightKg;
+
+    private Boolean homeDelivery = false;
+
+    @Size(max = 500)
+    private String deliveryAddress;
+
+    private BigDecimal deliveryLat;
+    private BigDecimal deliveryLng;
+
+    private Boolean homePickup = false;
+
+    @Size(max = 500)
+    private String pickupAddress;
+
+    /** Destination office when not home delivery. */
+    private String toOfficeCode;
+
+    /** Hub office when home delivery (FE hubOffice). */
+    private String hubOfficeCode;
+
+    /** Public draft origin; defaults to GP. */
+    private String fromOfficeCode;
+
+    @Size(max = 2000)
+    private String note;
+
+    /** Tuyến (Branch) code or name — preferred fare table. */
+    private String branchCode;
+
+    /** Tên tuyến / lộ trình FE suy từ VP gửi–nhận — dùng preset khi gán xe. */
+    @Size(max = 120)
+    private String routeLabel;
+
+    @Size(max = 200)
+    private String itineraryLabel;
+
+    /** FE gửi tổng cước theo kiện — nếu có thì dùng thay vì ước lượng 1 cân. */
+    private BigDecimal fareAmount;
+    private BigDecimal goodsFareAmount;
+    private BigDecimal pickupFeeAmount;
+    private BigDecimal deliveryFeeAmount;
+    private BigDecimal pickupKm;
+    private BigDecimal deliveryKm;
+    private BigDecimal declaredFeeAmount;
+    private BigDecimal discountAmount;
+    private BigDecimal codAmount;
+    private BigDecimal codFeeAmount;
+    private BigDecimal paidAmount;
+    private Integer quantity;
+
+    /** Tài khoản người gửi nhận tiền thu hộ (COD chuyển khoản). */
+    @Size(max = 120)
+    private String bankName;
+
+    @Size(max = 60)
+    private String bankAccountNo;
+
+    @Size(max = 120)
+    private String bankAccountName;
+
+    /** Ảnh đơn hàng (data:image/..., không bắt buộc, 1 ảnh). */
+    private String goodsPhoto;
+
+    public String getBankName() {
+        return bankName;
+    }
+
+    public void setBankName(String bankName) {
+        this.bankName = bankName;
+    }
+
+    public String getBankAccountNo() {
+        return bankAccountNo;
+    }
+
+    public void setBankAccountNo(String bankAccountNo) {
+        this.bankAccountNo = bankAccountNo;
+    }
+
+    public String getBankAccountName() {
+        return bankAccountName;
+    }
+
+    public void setBankAccountName(String bankAccountName) {
+        this.bankAccountName = bankAccountName;
+    }
+
+    public String getGoodsPhoto() {
+        return goodsPhoto;
+    }
+
+    public void setGoodsPhoto(String goodsPhoto) {
+        this.goodsPhoto = goodsPhoto;
+    }
+
+    public String getSenderPhone() {
+        return senderPhone;
+    }
+
+    public void setSenderPhone(String senderPhone) {
+        this.senderPhone = senderPhone;
+    }
+
+    public String getSenderName() {
+        return senderName;
+    }
+
+    public void setSenderName(String senderName) {
+        this.senderName = senderName;
+    }
+
+    public String getReceiverName() {
+        return receiverName;
+    }
+
+    public void setReceiverName(String receiverName) {
+        this.receiverName = receiverName;
+    }
+
+    public String getReceiverPhone() {
+        return receiverPhone;
+    }
+
+    public void setReceiverPhone(String receiverPhone) {
+        this.receiverPhone = receiverPhone;
+    }
+
+    public GoodsType getGoodsType() {
+        return goodsType;
+    }
+
+    public void setGoodsType(GoodsType goodsType) {
+        this.goodsType = goodsType;
+    }
+
+    public PaymentTerm getPaymentTerm() {
+        return paymentTerm;
+    }
+
+    public void setPaymentTerm(PaymentTerm paymentTerm) {
+        this.paymentTerm = paymentTerm;
+    }
+
+    public BigDecimal getEstimatedWeightKg() {
+        return estimatedWeightKg;
+    }
+
+    public void setEstimatedWeightKg(BigDecimal estimatedWeightKg) {
+        this.estimatedWeightKg = estimatedWeightKg;
+    }
+
+    public Boolean getHomeDelivery() {
+        return homeDelivery;
+    }
+
+    public void setHomeDelivery(Boolean homeDelivery) {
+        this.homeDelivery = homeDelivery;
+    }
+
+    public String getDeliveryAddress() {
+        return deliveryAddress;
+    }
+
+    public void setDeliveryAddress(String deliveryAddress) {
+        this.deliveryAddress = deliveryAddress;
+    }
+
+    public BigDecimal getDeliveryLat() {
+        return deliveryLat;
+    }
+
+    public void setDeliveryLat(BigDecimal deliveryLat) {
+        this.deliveryLat = deliveryLat;
+    }
+
+    public BigDecimal getDeliveryLng() {
+        return deliveryLng;
+    }
+
+    public void setDeliveryLng(BigDecimal deliveryLng) {
+        this.deliveryLng = deliveryLng;
+    }
+
+    public Boolean getHomePickup() {
+        return homePickup;
+    }
+
+    public void setHomePickup(Boolean homePickup) {
+        this.homePickup = homePickup;
+    }
+
+    public String getPickupAddress() {
+        return pickupAddress;
+    }
+
+    public void setPickupAddress(String pickupAddress) {
+        this.pickupAddress = pickupAddress;
+    }
+
+    public String getToOfficeCode() {
+        return toOfficeCode;
+    }
+
+    public void setToOfficeCode(String toOfficeCode) {
+        this.toOfficeCode = toOfficeCode;
+    }
+
+    public String getHubOfficeCode() {
+        return hubOfficeCode;
+    }
+
+    public void setHubOfficeCode(String hubOfficeCode) {
+        this.hubOfficeCode = hubOfficeCode;
+    }
+
+    public String getFromOfficeCode() {
+        return fromOfficeCode;
+    }
+
+    public void setFromOfficeCode(String fromOfficeCode) {
+        this.fromOfficeCode = fromOfficeCode;
+    }
+
+    public String getNote() {
+        return note;
+    }
+
+    public void setNote(String note) {
+        this.note = note;
+    }
+
+    public String getBranchCode() {
+        return branchCode;
+    }
+
+    public void setBranchCode(String branchCode) {
+        this.branchCode = branchCode;
+    }
+
+    public String getRouteLabel() {
+        return routeLabel;
+    }
+
+    public void setRouteLabel(String routeLabel) {
+        this.routeLabel = routeLabel;
+    }
+
+    public String getItineraryLabel() {
+        return itineraryLabel;
+    }
+
+    public void setItineraryLabel(String itineraryLabel) {
+        this.itineraryLabel = itineraryLabel;
+    }
+
+    public BigDecimal getFareAmount() {
+        return fareAmount;
+    }
+
+    public void setFareAmount(BigDecimal fareAmount) {
+        this.fareAmount = fareAmount;
+    }
+
+    public BigDecimal getGoodsFareAmount() {
+        return goodsFareAmount;
+    }
+
+    public void setGoodsFareAmount(BigDecimal goodsFareAmount) {
+        this.goodsFareAmount = goodsFareAmount;
+    }
+
+    public BigDecimal getPickupFeeAmount() {
+        return pickupFeeAmount;
+    }
+
+    public void setPickupFeeAmount(BigDecimal pickupFeeAmount) {
+        this.pickupFeeAmount = pickupFeeAmount;
+    }
+
+    public BigDecimal getDeliveryFeeAmount() {
+        return deliveryFeeAmount;
+    }
+
+    public void setDeliveryFeeAmount(BigDecimal deliveryFeeAmount) {
+        this.deliveryFeeAmount = deliveryFeeAmount;
+    }
+
+    public BigDecimal getPickupKm() {
+        return pickupKm;
+    }
+
+    public void setPickupKm(BigDecimal pickupKm) {
+        this.pickupKm = pickupKm;
+    }
+
+    public BigDecimal getDeliveryKm() {
+        return deliveryKm;
+    }
+
+    public void setDeliveryKm(BigDecimal deliveryKm) {
+        this.deliveryKm = deliveryKm;
+    }
+
+    public BigDecimal getDeclaredFeeAmount() {
+        return declaredFeeAmount;
+    }
+
+    public void setDeclaredFeeAmount(BigDecimal declaredFeeAmount) {
+        this.declaredFeeAmount = declaredFeeAmount;
+    }
+
+    public BigDecimal getDiscountAmount() {
+        return discountAmount;
+    }
+
+    public void setDiscountAmount(BigDecimal discountAmount) {
+        this.discountAmount = discountAmount;
+    }
+
+    public BigDecimal getCodAmount() {
+        return codAmount;
+    }
+
+    public void setCodAmount(BigDecimal codAmount) {
+        this.codAmount = codAmount;
+    }
+
+    public BigDecimal getCodFeeAmount() {
+        return codFeeAmount;
+    }
+
+    public void setCodFeeAmount(BigDecimal codFeeAmount) {
+        this.codFeeAmount = codFeeAmount;
+    }
+
+    public BigDecimal getPaidAmount() {
+        return paidAmount;
+    }
+
+    public void setPaidAmount(BigDecimal paidAmount) {
+        this.paidAmount = paidAmount;
+    }
+
+    public Integer getQuantity() {
+        return quantity;
+    }
+
+    public void setQuantity(Integer quantity) {
+        this.quantity = quantity;
+    }
+}

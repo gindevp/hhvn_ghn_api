@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+    <property name="now" value="now()" dbms="mysql"/>
+    <property name="floatType" value="float" dbms="mysql"/>
+    <property name="clobType" value="clob" dbms="mysql"/>
+    <property name="blobType" value="longblob" dbms="mysql"/>
+    <property name="uuidType" value="varchar(36)" dbms="mysql"/>
+    <property name="datetimeType" value="datetime(6)" dbms="mysql"/>
+
+    <include file="config/liquibase/changelog/00000000000000_initial_schema.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151658_added_entity_Office.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151659_added_entity_Route.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151700_added_entity_Vehicle.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151701_added_entity_Driver.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151702_added_entity_StaffProfile.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151703_added_entity_Customer.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151704_added_entity_ShipmentOrder.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151705_added_entity_OrderItem.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151706_added_entity_OrderLeg.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151707_added_entity_OrderEvent.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151708_added_entity_Trip.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151709_added_entity_TripOrderAssignment.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151710_added_entity_OrderPayment.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151711_added_entity_Receipt.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151712_added_entity_ReceiptOrderLine.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151713_added_entity_OrderPodPhoto.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151714_added_entity_OrderDeliveryAttempt.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151715_added_entity_OrderIssue.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151716_added_entity_OrderReturnRequest.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151717_added_entity_OrderFareAdjustmentRequest.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151718_added_entity_DayClosure.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151719_added_entity_PricingRule.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151720_added_entity_PricingChangeLog.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151721_added_entity_ProductPriceRule.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151722_added_entity_DoorFeeRule.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151723_added_entity_SurchargePolicy.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151724_added_entity_IntegrationConfig.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151725_added_entity_AuditLog.xml" relativeToChangelogFile="false"/>
+    <!-- jhipster-needle-liquibase-add-changelog - JHipster will add liquibase changelogs here -->
+    <include file="config/liquibase/changelog/20260811151659_added_entity_constraints_Route.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151702_added_entity_constraints_StaffProfile.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151704_added_entity_constraints_ShipmentOrder.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151705_added_entity_constraints_OrderItem.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151706_added_entity_constraints_OrderLeg.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151707_added_entity_constraints_OrderEvent.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151708_added_entity_constraints_Trip.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151709_added_entity_constraints_TripOrderAssignment.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151710_added_entity_constraints_OrderPayment.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151711_added_entity_constraints_Receipt.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151712_added_entity_constraints_ReceiptOrderLine.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151713_added_entity_constraints_OrderPodPhoto.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151714_added_entity_constraints_OrderDeliveryAttempt.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151718_added_entity_constraints_DayClosure.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151719_added_entity_constraints_PricingRule.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260811151720_added_entity_constraints_PricingChangeLog.xml" relativeToChangelogFile="false"/>
+    <!-- jhipster-needle-liquibase-add-constraints-changelog - JHipster will add liquibase constraints changelogs here -->
+    <!-- jhipster-needle-liquibase-add-incremental-changelog - JHipster will add incremental liquibase changelogs here -->
+    <include file="config/liquibase/changelog/20260811223000_seed_master_data_from_fe.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260812120000_order_issue_history_order_id.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260812140000_order_return_history_order_id.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260812150000_order_issue_one_open.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260813140000_added_entity_Branch.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260813140001_added_entity_Itinerary.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260813140001_added_entity_constraints_Itinerary.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260813140100_seed_branch_itinerary.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260813153000_seed_branch_itinerary_prod.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260814120000_pricing_rule_branch.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260814163000_vehicle_detail_fields.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260817161000_shipment_order_timestamps.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260818113000_trip_vehicle_driver_optional.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260818120000_trip_itinerary_label.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260821180000_pod_photo_url_longtext.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260822100000_role_group_rbac.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260825100000_role_titles_three.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260825140000_cod_fee_tiers.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260825160000_order_cod_fields.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260909110000_order_fare_components.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260909160000_mobile_app_version_policy.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260911140000_order_invoice_fields.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260911160000_order_misa_invoice.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260914090000_office_source_id_address.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260914100000_office_split_same_code.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260916150000_receipt_confirm.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260917143000_inventory_check.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260917160000_order_issue_reason_photos.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260921120000_maintenance_policy.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260922100000_ahamove_api_key.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260922110000_office_lat_lng.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260923120000_map_provider.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260924120000_office_dedupe_codes.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260924220000_office_itinerary_point.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260924233000_door_fee_overage.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260924235000_door_overage_by_kind.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260925100000_session_policy.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260925140000_receipt_confirm_proof.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260927140000_attendance_vehicle_events.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260929100000_receipt_waiver.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260929110000_login_control.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260930160000_shipment_order_list_indexes.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260930200000_shipment_order_on_credit.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260930220000_integration_autocall.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20260930233000_auto_call.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261002100000_autocall_retry.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261002120000_autocall_retry_intervals.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261002140000_autocall_retry_days.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261002170000_invoice_personal.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261003140000_order_event_detail_1000.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261003170000_pricing_rule_basis.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261003180000_vehicle_event_reason.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261003220000_staff_deposit.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261004110000_office_vehicle_itinerary.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261004140000_pricing_rule_size_dims.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005090000_autocall_vtech.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261004193000_receipt_confirm_note.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261004203000_receipt_confirm_proof_extra.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261004214500_order_goods_photo.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261004230000_inventory_check_photo.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005150000_order_cod_processed_by.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005170000_vehicle_pickup_offset.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005180000_vehicle_event_photo.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005190000_inventory_check_session.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005210000_ahamove_dispatch.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261005230000_shipper.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261006150000_partner_fee_expense.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261006230000_minio_config.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261007180000_pod_photo_caption.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261007200000_phone_tax_link.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261007210000_invoice_buyer_name.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008090000_staff_office_access.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008100000_scan_voice.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008110000_invoice_buyer_id_phone.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008140000_ahamove_sender_mobile.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008190000_fix_thanh_pho_address.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008220000_track_lookup_limit.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261008233000_qr_quiet_hours.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261009170000_partner_ship_confirm.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261009220000_receipt_line_portion.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261009224500_qr_auto_refresh.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261010001500_vehicle_depart_photo.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261010013000_app_database_slot.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261011133000_partner_sub_status.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261011204500_partner_pay_method.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261013120000_storage_return_fee.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261013180000_transit_hub_policy.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261014170000_bidv_collection.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261015120000_onepay_collection.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261016190000_onepay_order_code.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261016124500_order_code_tail.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261016150000_creator_device_id.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261016130000_vehicle_plan_trip.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261019110000_grab_express.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261019160000_grab_production.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261022180000_cod_fee_refund.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261023150000_media_retention_config.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261023170000_order_cod_bill_photo.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261023180000_phone_tax_auto_issue.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261024100000_onepay_receipt_collect.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261026120000_gapone_zns.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261026140000_gapone_zns_log.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261026160000_gapone_autocall_zns.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261028100000_gapone_login_otp.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261028110000_autocall_rate.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261028150000_order_transfer_paid.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261028160000_order_owner_phone.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261028170000_onepay_order_collect_channels.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261029120000_ghn_vehicle_schedule.xml" relativeToChangelogFile="false"/>
+    <include file="config/liquibase/changelog/20261029140000_ghn_vehicle_ops_policy.xml" relativeToChangelogFile="false"/>
+</databaseChangeLog>
+
+
+

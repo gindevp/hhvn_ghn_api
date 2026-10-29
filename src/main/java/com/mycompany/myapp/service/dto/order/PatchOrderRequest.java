@@ -1,0 +1,424 @@
+package com.mycompany.myapp.service.dto.order;
+
+import java.math.BigDecimal;
+
+public class PatchOrderRequest {
+
+    private String senderName;
+    private String senderPhone;
+    private String receiverName;
+    private String receiverPhone;
+    private String note;
+    private String pickupAddress;
+    private String deliveryAddress;
+    private BigDecimal deliveryLat;
+    private BigDecimal deliveryLng;
+    private BigDecimal weightKg;
+    private Integer quantity;
+    private BigDecimal fareAmount;
+    private Boolean homePickup;
+    private Boolean homeDelivery;
+    private String pickingAt;
+    private String pickedUpAt;
+    private String pickupStaffUsername;
+    private String partnerCode;
+    private BigDecimal partnerFeeAmount;
+    private String fromOfficeCode;
+    private String toOfficeCode;
+    private String hubOfficeCode;
+    private String finalToOfficeCode;
+    private BigDecimal codAmount;
+    private BigDecimal codFeeAmount;
+    /** Thành phần của fareAmount — chỉ để tách hiển thị, fareAmount vẫn là tổng phải thu. */
+    private BigDecimal goodsFareAmount;
+    private BigDecimal declaredFeeAmount;
+    private BigDecimal discountAmount;
+    private String bankName;
+    private String bankAccountNo;
+    private String bankAccountName;
+    private Boolean invoiceRequested;
+    private String invoiceTaxCode;
+    private String invoiceCompanyName;
+    private String invoiceEmail;
+    private String invoiceCompanyAddress;
+    private String invoiceBuyerName;
+
+    private String invoiceBuyerIdNumber;
+
+    private String invoiceBuyerPhone;
+    private String routeLabel;
+    private String itineraryLabel;
+    /** Optional override for order_event.action (default PATCH). */
+    private String eventAction;
+    /** Optional override for order_event.detail (default Vietnamese note). */
+    private String eventDetail;
+    /** true = chỉ cập nhật field, không ghi lịch sử tác động (vd. ghi kiện quét lên/xuống xe). */
+    private Boolean skipHistory;
+
+    public String getSenderName() {
+        return senderName;
+    }
+
+    public void setSenderName(String senderName) {
+        this.senderName = senderName;
+    }
+
+    public String getSenderPhone() {
+        return senderPhone;
+    }
+
+    public void setSenderPhone(String senderPhone) {
+        this.senderPhone = senderPhone;
+    }
+
+    public String getReceiverName() {
+        return receiverName;
+    }
+
+    public void setReceiverName(String receiverName) {
+        this.receiverName = receiverName;
+    }
+
+    public String getReceiverPhone() {
+        return receiverPhone;
+    }
+
+    public void setReceiverPhone(String receiverPhone) {
+        this.receiverPhone = receiverPhone;
+    }
+
+    public String getNote() {
+        return note;
+    }
+
+    public void setNote(String note) {
+        this.note = note;
+    }
+
+    public String getPickupAddress() {
+        return pickupAddress;
+    }
+
+    public void setPickupAddress(String pickupAddress) {
+        this.pickupAddress = pickupAddress;
+    }
+
+    public String getDeliveryAddress() {
+        return deliveryAddress;
+    }
+
+    public void setDeliveryAddress(String deliveryAddress) {
+        this.deliveryAddress = deliveryAddress;
+    }
+
+    public BigDecimal getDeliveryLat() {
+        return deliveryLat;
+    }
+
+    public void setDeliveryLat(BigDecimal deliveryLat) {
+        this.deliveryLat = deliveryLat;
+    }
+
+    public BigDecimal getDeliveryLng() {
+        return deliveryLng;
+    }
+
+    public void setDeliveryLng(BigDecimal deliveryLng) {
+        this.deliveryLng = deliveryLng;
+    }
+
+    public BigDecimal getWeightKg() {
+        return weightKg;
+    }
+
+    public void setWeightKg(BigDecimal weightKg) {
+        this.weightKg = weightKg;
+    }
+
+    public Integer getQuantity() {
+        return quantity;
+    }
+
+    public void setQuantity(Integer quantity) {
+        this.quantity = quantity;
+    }
+
+    public BigDecimal getFareAmount() {
+        return fareAmount;
+    }
+
+    public void setFareAmount(BigDecimal fareAmount) {
+        this.fareAmount = fareAmount;
+    }
+
+    public Boolean getHomePickup() {
+        return homePickup;
+    }
+
+    public void setHomePickup(Boolean homePickup) {
+        this.homePickup = homePickup;
+    }
+
+    public Boolean getHomeDelivery() {
+        return homeDelivery;
+    }
+
+    public void setHomeDelivery(Boolean homeDelivery) {
+        this.homeDelivery = homeDelivery;
+    }
+
+    public String getPickingAt() {
+        return pickingAt;
+    }
+
+    public void setPickingAt(String pickingAt) {
+        this.pickingAt = pickingAt;
+    }
+
+    public String getPickedUpAt() {
+        return pickedUpAt;
+    }
+
+    public void setPickedUpAt(String pickedUpAt) {
+        this.pickedUpAt = pickedUpAt;
+    }
+
+    public String getPickupStaffUsername() {
+        return pickupStaffUsername;
+    }
+
+    public void setPickupStaffUsername(String pickupStaffUsername) {
+        this.pickupStaffUsername = pickupStaffUsername;
+    }
+
+    public String getPartnerCode() {
+        return partnerCode;
+    }
+
+    public void setPartnerCode(String partnerCode) {
+        this.partnerCode = partnerCode;
+    }
+
+    public BigDecimal getPartnerFeeAmount() {
+        return partnerFeeAmount;
+    }
+
+    public void setPartnerFeeAmount(BigDecimal partnerFeeAmount) {
+        this.partnerFeeAmount = partnerFeeAmount;
+    }
+
+    public String getFromOfficeCode() {
+        return fromOfficeCode;
+    }
+
+    public void setFromOfficeCode(String fromOfficeCode) {
+        this.fromOfficeCode = fromOfficeCode;
+    }
+
+    public String getToOfficeCode() {
+        return toOfficeCode;
+    }
+
+    public void setToOfficeCode(String toOfficeCode) {
+        this.toOfficeCode = toOfficeCode;
+    }
+
+    public String getHubOfficeCode() {
+        return hubOfficeCode;
+    }
+
+    public void setHubOfficeCode(String hubOfficeCode) {
+        this.hubOfficeCode = hubOfficeCode;
+    }
+
+    public String getFinalToOfficeCode() {
+        return finalToOfficeCode;
+    }
+
+    public void setFinalToOfficeCode(String finalToOfficeCode) {
+        this.finalToOfficeCode = finalToOfficeCode;
+    }
+
+    public BigDecimal getCodAmount() {
+        return codAmount;
+    }
+
+    public void setCodAmount(BigDecimal codAmount) {
+        this.codAmount = codAmount;
+    }
+
+    public BigDecimal getCodFeeAmount() {
+        return codFeeAmount;
+    }
+
+    public void setCodFeeAmount(BigDecimal codFeeAmount) {
+        this.codFeeAmount = codFeeAmount;
+    }
+
+    public BigDecimal getGoodsFareAmount() {
+        return goodsFareAmount;
+    }
+
+    public void setGoodsFareAmount(BigDecimal goodsFareAmount) {
+        this.goodsFareAmount = goodsFareAmount;
+    }
+
+    public BigDecimal getDeclaredFeeAmount() {
+        return declaredFeeAmount;
+    }
+
+    public void setDeclaredFeeAmount(BigDecimal declaredFeeAmount) {
+        this.declaredFeeAmount = declaredFeeAmount;
+    }
+
+    public BigDecimal getDiscountAmount() {
+        return discountAmount;
+    }
+
+    public void setDiscountAmount(BigDecimal discountAmount) {
+        this.discountAmount = discountAmount;
+    }
+
+    public String getBankName() {
+        return bankName;
+    }
+
+    public void setBankName(String bankName) {
+        this.bankName = bankName;
+    }
+
+    public String getBankAccountNo() {
+        return bankAccountNo;
+    }
+
+    public void setBankAccountNo(String bankAccountNo) {
+        this.bankAccountNo = bankAccountNo;
+    }
+
+    public String getBankAccountName() {
+        return bankAccountName;
+    }
+
+    public void setBankAccountName(String bankAccountName) {
+        this.bankAccountName = bankAccountName;
+    }
+
+    public Boolean getInvoiceRequested() {
+        return invoiceRequested;
+    }
+
+    public void setInvoiceRequested(Boolean invoiceRequested) {
+        this.invoiceRequested = invoiceRequested;
+    }
+
+    public String getInvoiceTaxCode() {
+        return invoiceTaxCode;
+    }
+
+    public void setInvoiceTaxCode(String invoiceTaxCode) {
+        this.invoiceTaxCode = invoiceTaxCode;
+    }
+
+    public String getInvoiceCompanyName() {
+        return invoiceCompanyName;
+    }
+
+    public void setInvoiceCompanyName(String invoiceCompanyName) {
+        this.invoiceCompanyName = invoiceCompanyName;
+    }
+
+    public String getInvoiceEmail() {
+        return invoiceEmail;
+    }
+
+    public void setInvoiceEmail(String invoiceEmail) {
+        this.invoiceEmail = invoiceEmail;
+    }
+
+    public String getInvoiceCompanyAddress() {
+        return invoiceCompanyAddress;
+    }
+
+    public void setInvoiceCompanyAddress(String invoiceCompanyAddress) {
+        this.invoiceCompanyAddress = invoiceCompanyAddress;
+    }
+
+    public String getInvoiceBuyerName() {
+        return invoiceBuyerName;
+    }
+
+    public void setInvoiceBuyerName(String invoiceBuyerName) {
+        this.invoiceBuyerName = invoiceBuyerName;
+    }
+
+    public String getInvoiceBuyerIdNumber() {
+        return invoiceBuyerIdNumber;
+    }
+
+    public void setInvoiceBuyerIdNumber(String invoiceBuyerIdNumber) {
+        this.invoiceBuyerIdNumber = invoiceBuyerIdNumber;
+    }
+
+    public String getInvoiceBuyerPhone() {
+        return invoiceBuyerPhone;
+    }
+
+    public void setInvoiceBuyerPhone(String invoiceBuyerPhone) {
+        this.invoiceBuyerPhone = invoiceBuyerPhone;
+    }
+
+    public String getRouteLabel() {
+        return routeLabel;
+    }
+
+    public void setRouteLabel(String routeLabel) {
+        this.routeLabel = routeLabel;
+    }
+
+    public String getItineraryLabel() {
+        return itineraryLabel;
+    }
+
+    public void setItineraryLabel(String itineraryLabel) {
+        this.itineraryLabel = itineraryLabel;
+    }
+
+    public String getEventAction() {
+        return eventAction;
+    }
+
+    public void setEventAction(String eventAction) {
+        this.eventAction = eventAction;
+    }
+
+    public String getEventDetail() {
+        return eventDetail;
+    }
+
+    public void setEventDetail(String eventDetail) {
+        this.eventDetail = eventDetail;
+    }
+
+    public Boolean getSkipHistory() {
+        return skipHistory;
+    }
+
+    public void setSkipHistory(Boolean skipHistory) {
+        this.skipHistory = skipHistory;
+    }
+
+    /**
+     * Đơn người gửi đã trả đủ mà sửa làm cước tăng: ai trả phần chênh.
+     * SENDER = người gửi trả thêm (ghi thu vào ca người sửa); RECEIVER = chuyển "Thu cước 1 phần", thu người nhận khi giao.
+     * Bỏ trống = giữ cách xử lý cũ.
+     */
+    private String extraFarePayer;
+
+    public String getExtraFarePayer() {
+        return extraFarePayer;
+    }
+
+    public void setExtraFarePayer(String extraFarePayer) {
+        this.extraFarePayer = extraFarePayer;
+    }
+}

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261026160000-1" author="cpn">
+        <addColumn tableName="integration_config">
+            <column name="gapone_autocall_zns_enabled" type="boolean" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+            <column name="gapone_autocall_zns_template_id" type="varchar(64)"/>
+            <column name="gapone_autocall_zns_field_map" type="varchar(2000)"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="20261026160000-2" author="cpn">
+        <addColumn tableName="gapone_zns_log">
+            <column name="source" type="varchar(32)"/>
+            <column name="order_code" type="varchar(64)"/>
+        </addColumn>
+        <createIndex tableName="gapone_zns_log" indexName="ix_gapone_zns_log_order_source">
+            <column name="order_code"/>
+            <column name="source"/>
+        </createIndex>
+    </changeSet>
+</databaseChangeLog>

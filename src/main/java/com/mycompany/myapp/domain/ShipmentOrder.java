@@ -1,0 +1,1742 @@
+package com.mycompany.myapp.domain;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.mycompany.myapp.domain.enumeration.ForwardStage;
+import com.mycompany.myapp.domain.enumeration.GoodsType;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import com.mycompany.myapp.domain.enumeration.ReturnStage;
+import com.mycompany.myapp.domain.enumeration.ServiceType;
+import jakarta.persistence.*;
+import jakarta.validation.constraints.*;
+import java.io.Serializable;
+import java.math.BigDecimal;
+import java.time.Instant;
+
+/**
+ * A ShipmentOrder.
+ */
+@Entity
+@Table(name = "shipment_order")
+@SuppressWarnings("common-java:DuplicatedBlocks")
+public class ShipmentOrder implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "id")
+    private Long id;
+
+    @NotNull
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private Instant createdAt;
+
+    @NotNull
+    @Column(name = "updated_at", nullable = false)
+    private Instant updatedAt;
+
+    @NotNull
+    @Size(max = 40)
+    @Column(name = "order_code", length = 40, nullable = false, unique = true)
+    private String orderCode;
+
+    /** 4 ký tự cuối của mã đơn, chữ hoa — index để kiểm tra trùng đuôi lúc cấp mã, không quét cả bảng. */
+    @Size(max = 4)
+    @Column(name = "order_code_tail", length = 4)
+    private String orderCodeTail;
+
+    @Size(max = 40)
+    @Column(name = "draft_code", length = 40, unique = true)
+    private String draftCode;
+
+    @NotNull
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false)
+    private OrderStatus status;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "forward_stage")
+    private ForwardStage forwardStage;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "return_stage")
+    private ReturnStage returnStage;
+
+    @NotNull
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_term", nullable = false)
+    private PaymentTerm paymentTerm;
+
+    @NotNull
+    @Enumerated(EnumType.STRING)
+    @Column(name = "goods_type", nullable = false)
+    private GoodsType goodsType;
+
+    @NotNull
+    @Enumerated(EnumType.STRING)
+    @Column(name = "service_type", nullable = false)
+    private ServiceType serviceType;
+
+    @Size(max = 100)
+    @Column(name = "sender_name", length = 100)
+    private String senderName;
+
+    @NotNull
+    @Pattern(regexp = "^(0[35789]\\d{8}|\\+84[35789]\\d{8})$")
+    @Column(name = "sender_phone", nullable = false)
+    private String senderPhone;
+
+    @NotNull
+    @Size(max = 100)
+    @Column(name = "receiver_name", length = 100, nullable = false)
+    private String receiverName;
+
+    @NotNull
+    @Pattern(regexp = "^(0[35789]\\d{8}|\\+84[35789]\\d{8})$")
+    @Column(name = "receiver_phone", nullable = false)
+    private String receiverPhone;
+
+    @Size(max = 500)
+    @Column(name = "delivery_address", length = 500)
+    private String deliveryAddress;
+
+    @Size(max = 500)
+    @Column(name = "pickup_address", length = 500)
+    private String pickupAddress;
+
+    @NotNull
+    @Column(name = "home_pickup", nullable = false)
+    private Boolean homePickup;
+
+    @NotNull
+    @Column(name = "home_delivery", nullable = false)
+    private Boolean homeDelivery;
+
+    @NotNull
+    @Column(name = "qr_drop_off", nullable = false)
+    private Boolean qrDropOff;
+
+    @Size(max = 50)
+    @Column(name = "pickup_staff_username", length = 50)
+    private String pickupStaffUsername;
+
+    @Column(name = "picking_at")
+    private Instant pickingAt;
+
+    @Column(name = "picked_up_at")
+    private Instant pickedUpAt;
+
+    @Size(max = 100)
+    @Column(name = "receiver_actual_name", length = 100)
+    private String receiverActualName;
+
+    @Size(max = 20)
+    @Column(name = "receiver_actual_phone", length = 20)
+    private String receiverActualPhone;
+
+    @DecimalMin(value = "0")
+    @Column(name = "weight_kg", precision = 21, scale = 2)
+    private BigDecimal weightKg;
+
+    @NotNull
+    @Min(value = 1)
+    @Column(name = "quantity", nullable = false)
+    private Integer quantity;
+
+    @Size(max = 120)
+    @Column(name = "dimensions_text", length = 120)
+    private String dimensionsText;
+
+    /** Tổng tiền phải thu (gồm cước hàng + các phí + phí thu hộ - giảm giá). Mọi tính toán due/H1 dựa trên cột này. */
+    @NotNull
+    @DecimalMin(value = "0")
+    @Column(name = "fare_amount", precision = 21, scale = 2, nullable = false)
+    private BigDecimal fareAmount;
+
+    /** Cước hàng thuần (không gồm phí tận nơi / thu hộ / khai giá). NULL với đơn tạo trước khi tách thành phần. */
+    @DecimalMin(value = "0")
+    @Column(name = "goods_fare_amount", precision = 21, scale = 2)
+    private BigDecimal goodsFareAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "declared_fee_amount", precision = 21, scale = 2)
+    private BigDecimal declaredFeeAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "discount_amount", precision = 21, scale = 2)
+    private BigDecimal discountAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "pickup_fee_amount", precision = 21, scale = 2)
+    private BigDecimal pickupFeeAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "delivery_fee_amount", precision = 21, scale = 2)
+    private BigDecimal deliveryFeeAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "partner_fee_amount", precision = 21, scale = 2)
+    private BigDecimal partnerFeeAmount;
+
+    /** Số suất tip đã chọn lúc book Grab. Xóa sau khi Grab nhận tip. */
+    @Column(name = "partner_tip_units")
+    private Integer partnerTipUnits;
+
+    /** BALANCE = ví Ahamove, CASH = tiền mặt lúc book. */
+    @Size(max = 20)
+    @Column(name = "partner_pay_method", length = 20)
+    private String partnerPayMethod;
+
+    /** Tiền thu hộ COD (không gồm phí thu hộ). */
+    @DecimalMin(value = "0")
+    @Column(name = "cod_amount", precision = 21, scale = 2)
+    private BigDecimal codAmount;
+
+    /** Phí thu hộ COD (đã cộng vào fare_amount). */
+    @DecimalMin(value = "0")
+    @Column(name = "cod_fee_amount", precision = 21, scale = 2)
+    private BigDecimal codFeeAmount;
+
+    /**
+     * Tiền hoàn phí COD: đã thu phí thu hộ trong paid_amount rồi bỏ khỏi cước (cước mới &lt; đã thu).
+     * Giữ paid_amount và {@code cod_fee_amount} (biết hoàn bao nhiêu); COD hàng = 0.
+     * In biên nhận / DNTT ghi «tiền hoàn phí COD».
+     */
+    @DecimalMin(value = "0")
+    @Column(name = "cod_fee_refund_amount", precision = 21, scale = 2)
+    private BigDecimal codFeeRefundAmount;
+
+    /** Phí tồn kho tại kho giao (đã cộng vào fare_amount). */
+    @DecimalMin(value = "0")
+    @Column(name = "storage_fee_amount", precision = 21, scale = 2)
+    private BigDecimal storageFeeAmount;
+
+    /** Phí hoàn đơn (đã cộng vào fare_amount). */
+    @DecimalMin(value = "0")
+    @Column(name = "return_fee_amount", precision = 21, scale = 2)
+    private BigDecimal returnFeeAmount;
+
+    @Size(max = 120)
+    @Column(name = "bank_name", length = 120)
+    private String bankName;
+
+    @Size(max = 60)
+    @Column(name = "bank_account_no", length = 60)
+    private String bankAccountNo;
+
+    @Size(max = 120)
+    @Column(name = "bank_account_name", length = 120)
+    private String bankAccountName;
+
+    @Column(name = "invoice_requested", nullable = false)
+    private Boolean invoiceRequested = false;
+
+    /** Đơn công nợ: cước ghi nợ khách, không thu tại VP gửi / khi giao. */
+    @Column(name = "on_credit", nullable = false)
+    private Boolean onCredit = false;
+
+    @Size(max = 20)
+    @Column(name = "invoice_tax_code", length = 20)
+    private String invoiceTaxCode;
+
+    @Size(max = 200)
+    @Column(name = "invoice_company_name", length = 200)
+    private String invoiceCompanyName;
+
+    @Size(max = 120)
+    @Column(name = "invoice_email", length = 120)
+    private String invoiceEmail;
+
+    @Size(max = 255)
+    @Column(name = "invoice_company_address", length = 255)
+    private String invoiceCompanyAddress;
+
+    /** Tên người trên hóa đơn (đã viết hoa). Trống thì lúc xuất lấy tên người trả cước. */
+    @Size(max = 100)
+    @Column(name = "invoice_buyer_name", length = 100)
+    private String invoiceBuyerName;
+
+    /** CCCD/CMND người trên hóa đơn (không bắt buộc). */
+    @Size(max = 20)
+    @Column(name = "invoice_buyer_id_number", length = 20)
+    private String invoiceBuyerIdNumber;
+
+    /** SĐT người trên hóa đơn (không bắt buộc). Có thì ưu tiên khi xuất MISA. */
+    @Size(max = 20)
+    @Column(name = "invoice_buyer_phone", length = 20)
+    private String invoiceBuyerPhone;
+
+    /** RefID gửi MISA — idempotent key, vd. XE-{orderCode}. */
+    @Size(max = 80)
+    @Column(name = "invoice_ref_id", length = 80)
+    private String invoiceRefId;
+
+    /** PENDING | ISSUED | DUPLICATE | FAILED | SKIPPED | MANUAL (kế toán tích đã xuất cá nhân ngoài hệ thống) */
+    @Size(max = 20)
+    @Column(name = "invoice_status", length = 20)
+    private String invoiceStatus;
+
+    /** COMPANY | PERSONAL — loại HĐ đã xuất / đang xuất. */
+    @Size(max = 20)
+    @Column(name = "invoice_type", length = 20)
+    private String invoiceType;
+
+    @Size(max = 80)
+    @Column(name = "invoice_transaction_id", length = 80)
+    private String invoiceTransactionId;
+
+    @Size(max = 40)
+    @Column(name = "invoice_no", length = 40)
+    private String invoiceNo;
+
+    @Size(max = 40)
+    @Column(name = "invoice_series", length = 40)
+    private String invoiceSeries;
+
+    @Size(max = 80)
+    @Column(name = "invoice_code", length = 80)
+    private String invoiceCode;
+
+    @DecimalMin(value = "0")
+    @Column(name = "invoice_gross_amount", precision = 21, scale = 2)
+    private BigDecimal invoiceGrossAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "invoice_net_amount", precision = 21, scale = 2)
+    private BigDecimal invoiceNetAmount;
+
+    @DecimalMin(value = "0")
+    @Column(name = "invoice_vat_amount", precision = 21, scale = 2)
+    private BigDecimal invoiceVatAmount;
+
+    @Column(name = "invoice_issued_at")
+    private Instant invoiceIssuedAt;
+
+    @Size(max = 500)
+    @Column(name = "invoice_error", length = 500)
+    private String invoiceError;
+
+    @Column(name = "invoice_retry_count")
+    private Integer invoiceRetryCount;
+
+    @Size(max = 120)
+    @Column(name = "route_label", length = 120)
+    private String routeLabel;
+
+    @Size(max = 200)
+    @Column(name = "itinerary_label", length = 200)
+    private String itineraryLabel;
+
+    /** Null = chưa xuất Excel thanh toán COD. */
+    @Column(name = "cod_exported_at")
+    private Instant codExportedAt;
+
+    @Size(max = 50)
+    @Column(name = "cod_exported_by", length = 50)
+    private String codExportedBy;
+
+    /** Lúc khách chuyển khoản OnePay đủ cước; null = chưa chuyển khoản. */
+    @Column(name = "transfer_paid_at")
+    private Instant transferPaidAt;
+
+    /** Chuyển khoản qua OnePay SANDBOX (đơn test): huỷ thì không giữ doanh thu. */
+    @Column(name = "transfer_sandbox")
+    private Boolean transferSandbox;
+
+    /** SĐT tài khoản khách tạo đơn (0xxxxxxxxx) — web khách đã đăng nhập hoặc app chọn vé. */
+    @Size(max = 20)
+    @Column(name = "owner_phone", length = 20)
+    private String ownerPhone;
+
+    @NotNull
+    @DecimalMin(value = "0")
+    @Column(name = "paid_amount", precision = 21, scale = 2, nullable = false)
+    private BigDecimal paidAmount;
+
+    @Min(value = 0)
+    @Max(value = 9)
+    @Column(name = "shelf_number")
+    private Integer shelfNumber;
+
+    @Lob
+    @Column(name = "note")
+    private String note;
+
+    @Size(max = 255)
+    @Column(name = "cancel_reason", length = 255)
+    private String cancelReason;
+
+    @Column(name = "label_printed_at")
+    private Instant labelPrintedAt;
+
+    @Min(value = 0)
+    @Column(name = "label_reprint_count")
+    private Integer labelReprintCount;
+
+    @NotNull
+    @Min(value = 0)
+    @Column(name = "fail_count", nullable = false)
+    private Integer failCount;
+
+    @Size(max = 100)
+    @Column(name = "partner_code", length = 100)
+    private String partnerCode;
+
+    /** Mã đơn bên đối tác giao tận nơi (Ahamove order_id) — khoá tra cứu webhook. */
+    @Size(max = 64)
+    @Column(name = "partner_order_id", length = 64)
+    private String partnerOrderId;
+
+    @Size(max = 40)
+    @Column(name = "partner_status", length = 40)
+    private String partnerStatus;
+
+    /** sub_status Ahamove: BOARDED, ARRIVED, COMPLETING, IN_RETURN, RETURNED. */
+    @Size(max = 40)
+    @Column(name = "partner_sub_status", length = 40)
+    private String partnerSubStatus;
+
+    @Size(max = 500)
+    @Column(name = "partner_tracking_url", length = 500)
+    private String partnerTrackingUrl;
+
+    @Size(max = 100)
+    @Column(name = "partner_driver_name", length = 100)
+    private String partnerDriverName;
+
+    @Size(max = 32)
+    @Column(name = "partner_driver_phone", length = 32)
+    private String partnerDriverPhone;
+
+    @Size(max = 1000)
+    @Column(name = "partner_pod_url", length = 1000)
+    private String partnerPodUrl;
+
+    @Size(max = 500)
+    @Column(name = "partner_fail_reason", length = 500)
+    private String partnerFailReason;
+
+    @Column(name = "partner_updated_at")
+    private Instant partnerUpdatedAt;
+
+    /** Cước tài xế đối tác ứng cho VP lúc lấy hàng và thu lại người nhận (Ahamove {@code cod}). */
+    @Column(name = "partner_cod_amount", precision = 21, scale = 2)
+    private BigDecimal partnerCodAmount;
+
+    /** NV quầy xác nhận đã nhận tiền ứng; null = chưa nhận. */
+    @Column(name = "partner_cod_collected_at")
+    private Instant partnerCodCollectedAt;
+
+    @Column(name = "partner_cod_collected_by", length = 50)
+    private String partnerCodCollectedBy;
+
+    /** Người giao đã xác nhận chịu nợ ship (quét app hoặc bấm bù). Null = người bàn giao web đang chịu nợ thay. */
+    @Size(max = 50)
+    @Column(name = "partner_ship_confirmed_by", length = 50)
+    private String partnerShipConfirmedBy;
+
+    @Column(name = "partner_ship_confirmed_at")
+    private Instant partnerShipConfirmedAt;
+
+    @Column(name = "delivery_lat", precision = 10, scale = 7)
+    private BigDecimal deliveryLat;
+
+    @Column(name = "delivery_lng", precision = 10, scale = 7)
+    private BigDecimal deliveryLng;
+
+    @DecimalMin(value = "0")
+    @DecimalMax(value = "100")
+    @Column(name = "payment_percent", precision = 21, scale = 2)
+    private BigDecimal paymentPercent;
+
+    @NotNull
+    @Column(name = "public_tracking_allowed", nullable = false)
+    private Boolean publicTrackingAllowed;
+
+    /** Thiết bị tạo đơn khách. Cùng mã khi tra cứu thì không tính hạn mức tra cứu công khai. */
+    @Column(name = "creator_device_id", length = 80)
+    private String creatorDeviceId;
+
+    @PrePersist
+    protected void setCreationTimestamps() {
+        Instant now = Instant.now();
+        if (createdAt == null) {
+            createdAt = now;
+        }
+        updatedAt = now;
+    }
+
+    @PreUpdate
+    protected void setUpdateTimestamp() {
+        updatedAt = Instant.now();
+    }
+
+    @JsonIgnoreProperties(value = { "order" }, allowSetters = true)
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(unique = true)
+    private OrderIssue issue;
+
+    @JsonIgnoreProperties(value = { "order" }, allowSetters = true)
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(unique = true)
+    private OrderReturnRequest returnRequest;
+
+    @JsonIgnoreProperties(value = { "order" }, allowSetters = true)
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(unique = true)
+    private OrderFareAdjustmentRequest fareAdjustmentRequest;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    private Customer senderCustomer;
+
+    @ManyToOne(optional = false)
+    @NotNull
+    private Office fromOffice;
+
+    @ManyToOne(optional = false)
+    @NotNull
+    private Office toOffice;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    private Office hubOffice;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    private Office finalToOffice;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    private Shipper shipper;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JsonIgnoreProperties(value = { "office", "route", "vehicle", "driver" }, allowSetters = true)
+    private Trip currentTrip;
+
+    // jhipster-needle-entity-add-field - JHipster will add fields here
+
+    public Long getId() {
+        return this.id;
+    }
+
+    public ShipmentOrder id(Long id) {
+        this.setId(id);
+        return this;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
+    }
+
+    public String getOrderCode() {
+        return this.orderCode;
+    }
+
+    public ShipmentOrder orderCode(String orderCode) {
+        this.setOrderCode(orderCode);
+        return this;
+    }
+
+    public void setOrderCode(String orderCode) {
+        this.orderCode = orderCode;
+        this.orderCodeTail = orderCodeTailOf(orderCode);
+    }
+
+    static String orderCodeTailOf(String orderCode) {
+        if (orderCode == null) {
+            return null;
+        }
+        String code = orderCode.trim();
+        if (code.isEmpty()) {
+            return null;
+        }
+        String tail = code.length() <= 4 ? code : code.substring(code.length() - 4);
+        return tail.toUpperCase();
+    }
+
+    public String getDraftCode() {
+        return this.draftCode;
+    }
+
+    public ShipmentOrder draftCode(String draftCode) {
+        this.setDraftCode(draftCode);
+        return this;
+    }
+
+    public void setDraftCode(String draftCode) {
+        this.draftCode = draftCode;
+    }
+
+    public OrderStatus getStatus() {
+        return this.status;
+    }
+
+    public ShipmentOrder status(OrderStatus status) {
+        this.setStatus(status);
+        return this;
+    }
+
+    public void setStatus(OrderStatus status) {
+        this.status = status;
+    }
+
+    public ForwardStage getForwardStage() {
+        return this.forwardStage;
+    }
+
+    public ShipmentOrder forwardStage(ForwardStage forwardStage) {
+        this.setForwardStage(forwardStage);
+        return this;
+    }
+
+    public void setForwardStage(ForwardStage forwardStage) {
+        this.forwardStage = forwardStage;
+    }
+
+    public ReturnStage getReturnStage() {
+        return this.returnStage;
+    }
+
+    public ShipmentOrder returnStage(ReturnStage returnStage) {
+        this.setReturnStage(returnStage);
+        return this;
+    }
+
+    public void setReturnStage(ReturnStage returnStage) {
+        this.returnStage = returnStage;
+    }
+
+    public PaymentTerm getPaymentTerm() {
+        return this.paymentTerm;
+    }
+
+    public ShipmentOrder paymentTerm(PaymentTerm paymentTerm) {
+        this.setPaymentTerm(paymentTerm);
+        return this;
+    }
+
+    public void setPaymentTerm(PaymentTerm paymentTerm) {
+        this.paymentTerm = paymentTerm;
+    }
+
+    public GoodsType getGoodsType() {
+        return this.goodsType;
+    }
+
+    public ShipmentOrder goodsType(GoodsType goodsType) {
+        this.setGoodsType(goodsType);
+        return this;
+    }
+
+    public void setGoodsType(GoodsType goodsType) {
+        this.goodsType = goodsType;
+    }
+
+    public ServiceType getServiceType() {
+        return this.serviceType;
+    }
+
+    public ShipmentOrder serviceType(ServiceType serviceType) {
+        this.setServiceType(serviceType);
+        return this;
+    }
+
+    public void setServiceType(ServiceType serviceType) {
+        this.serviceType = serviceType;
+    }
+
+    public String getSenderName() {
+        return this.senderName;
+    }
+
+    public ShipmentOrder senderName(String senderName) {
+        this.setSenderName(senderName);
+        return this;
+    }
+
+    public void setSenderName(String senderName) {
+        this.senderName = senderName;
+    }
+
+    public String getSenderPhone() {
+        return this.senderPhone;
+    }
+
+    public ShipmentOrder senderPhone(String senderPhone) {
+        this.setSenderPhone(senderPhone);
+        return this;
+    }
+
+    public void setSenderPhone(String senderPhone) {
+        this.senderPhone = senderPhone;
+    }
+
+    public String getReceiverName() {
+        return this.receiverName;
+    }
+
+    public ShipmentOrder receiverName(String receiverName) {
+        this.setReceiverName(receiverName);
+        return this;
+    }
+
+    public void setReceiverName(String receiverName) {
+        this.receiverName = receiverName;
+    }
+
+    public String getReceiverPhone() {
+        return this.receiverPhone;
+    }
+
+    public ShipmentOrder receiverPhone(String receiverPhone) {
+        this.setReceiverPhone(receiverPhone);
+        return this;
+    }
+
+    public void setReceiverPhone(String receiverPhone) {
+        this.receiverPhone = receiverPhone;
+    }
+
+    public String getDeliveryAddress() {
+        return this.deliveryAddress;
+    }
+
+    public ShipmentOrder deliveryAddress(String deliveryAddress) {
+        this.setDeliveryAddress(deliveryAddress);
+        return this;
+    }
+
+    public void setDeliveryAddress(String deliveryAddress) {
+        this.deliveryAddress = deliveryAddress;
+    }
+
+    public String getPickupAddress() {
+        return this.pickupAddress;
+    }
+
+    public ShipmentOrder pickupAddress(String pickupAddress) {
+        this.setPickupAddress(pickupAddress);
+        return this;
+    }
+
+    public void setPickupAddress(String pickupAddress) {
+        this.pickupAddress = pickupAddress;
+    }
+
+    public Boolean getHomePickup() {
+        return this.homePickup;
+    }
+
+    public ShipmentOrder homePickup(Boolean homePickup) {
+        this.setHomePickup(homePickup);
+        return this;
+    }
+
+    public void setHomePickup(Boolean homePickup) {
+        this.homePickup = homePickup;
+    }
+
+    public Boolean getHomeDelivery() {
+        return this.homeDelivery;
+    }
+
+    public ShipmentOrder homeDelivery(Boolean homeDelivery) {
+        this.setHomeDelivery(homeDelivery);
+        return this;
+    }
+
+    public void setHomeDelivery(Boolean homeDelivery) {
+        this.homeDelivery = homeDelivery;
+    }
+
+    public Boolean getQrDropOff() {
+        return this.qrDropOff;
+    }
+
+    public ShipmentOrder qrDropOff(Boolean qrDropOff) {
+        this.setQrDropOff(qrDropOff);
+        return this;
+    }
+
+    public void setQrDropOff(Boolean qrDropOff) {
+        this.qrDropOff = qrDropOff;
+    }
+
+    public String getPickupStaffUsername() {
+        return this.pickupStaffUsername;
+    }
+
+    public ShipmentOrder pickupStaffUsername(String pickupStaffUsername) {
+        this.setPickupStaffUsername(pickupStaffUsername);
+        return this;
+    }
+
+    public void setPickupStaffUsername(String pickupStaffUsername) {
+        this.pickupStaffUsername = pickupStaffUsername;
+    }
+
+    public Instant getPickingAt() {
+        return this.pickingAt;
+    }
+
+    public ShipmentOrder pickingAt(Instant pickingAt) {
+        this.setPickingAt(pickingAt);
+        return this;
+    }
+
+    public void setPickingAt(Instant pickingAt) {
+        this.pickingAt = pickingAt;
+    }
+
+    public Instant getPickedUpAt() {
+        return this.pickedUpAt;
+    }
+
+    public ShipmentOrder pickedUpAt(Instant pickedUpAt) {
+        this.setPickedUpAt(pickedUpAt);
+        return this;
+    }
+
+    public void setPickedUpAt(Instant pickedUpAt) {
+        this.pickedUpAt = pickedUpAt;
+    }
+
+    public String getReceiverActualName() {
+        return this.receiverActualName;
+    }
+
+    public ShipmentOrder receiverActualName(String receiverActualName) {
+        this.setReceiverActualName(receiverActualName);
+        return this;
+    }
+
+    public void setReceiverActualName(String receiverActualName) {
+        this.receiverActualName = receiverActualName;
+    }
+
+    public String getReceiverActualPhone() {
+        return this.receiverActualPhone;
+    }
+
+    public ShipmentOrder receiverActualPhone(String receiverActualPhone) {
+        this.setReceiverActualPhone(receiverActualPhone);
+        return this;
+    }
+
+    public void setReceiverActualPhone(String receiverActualPhone) {
+        this.receiverActualPhone = receiverActualPhone;
+    }
+
+    public BigDecimal getWeightKg() {
+        return this.weightKg;
+    }
+
+    public ShipmentOrder weightKg(BigDecimal weightKg) {
+        this.setWeightKg(weightKg);
+        return this;
+    }
+
+    public void setWeightKg(BigDecimal weightKg) {
+        this.weightKg = weightKg;
+    }
+
+    public Integer getQuantity() {
+        return this.quantity;
+    }
+
+    public ShipmentOrder quantity(Integer quantity) {
+        this.setQuantity(quantity);
+        return this;
+    }
+
+    public void setQuantity(Integer quantity) {
+        this.quantity = quantity;
+    }
+
+    public String getDimensionsText() {
+        return this.dimensionsText;
+    }
+
+    public ShipmentOrder dimensionsText(String dimensionsText) {
+        this.setDimensionsText(dimensionsText);
+        return this;
+    }
+
+    public void setDimensionsText(String dimensionsText) {
+        this.dimensionsText = dimensionsText;
+    }
+
+    public BigDecimal getFareAmount() {
+        return this.fareAmount;
+    }
+
+    public ShipmentOrder fareAmount(BigDecimal fareAmount) {
+        this.setFareAmount(fareAmount);
+        return this;
+    }
+
+    public void setFareAmount(BigDecimal fareAmount) {
+        this.fareAmount = fareAmount;
+    }
+
+    public BigDecimal getGoodsFareAmount() {
+        return this.goodsFareAmount;
+    }
+
+    public ShipmentOrder goodsFareAmount(BigDecimal goodsFareAmount) {
+        this.setGoodsFareAmount(goodsFareAmount);
+        return this;
+    }
+
+    public void setGoodsFareAmount(BigDecimal goodsFareAmount) {
+        this.goodsFareAmount = goodsFareAmount;
+    }
+
+    public BigDecimal getDeclaredFeeAmount() {
+        return this.declaredFeeAmount;
+    }
+
+    public ShipmentOrder declaredFeeAmount(BigDecimal declaredFeeAmount) {
+        this.setDeclaredFeeAmount(declaredFeeAmount);
+        return this;
+    }
+
+    public void setDeclaredFeeAmount(BigDecimal declaredFeeAmount) {
+        this.declaredFeeAmount = declaredFeeAmount;
+    }
+
+    public BigDecimal getDiscountAmount() {
+        return this.discountAmount;
+    }
+
+    public ShipmentOrder discountAmount(BigDecimal discountAmount) {
+        this.setDiscountAmount(discountAmount);
+        return this;
+    }
+
+    public void setDiscountAmount(BigDecimal discountAmount) {
+        this.discountAmount = discountAmount;
+    }
+
+    public BigDecimal getPickupFeeAmount() {
+        return this.pickupFeeAmount;
+    }
+
+    public ShipmentOrder pickupFeeAmount(BigDecimal pickupFeeAmount) {
+        this.setPickupFeeAmount(pickupFeeAmount);
+        return this;
+    }
+
+    public void setPickupFeeAmount(BigDecimal pickupFeeAmount) {
+        this.pickupFeeAmount = pickupFeeAmount;
+    }
+
+    public BigDecimal getDeliveryFeeAmount() {
+        return this.deliveryFeeAmount;
+    }
+
+    public ShipmentOrder deliveryFeeAmount(BigDecimal deliveryFeeAmount) {
+        this.setDeliveryFeeAmount(deliveryFeeAmount);
+        return this;
+    }
+
+    public void setDeliveryFeeAmount(BigDecimal deliveryFeeAmount) {
+        this.deliveryFeeAmount = deliveryFeeAmount;
+    }
+
+    public BigDecimal getPartnerFeeAmount() {
+        return this.partnerFeeAmount;
+    }
+
+    public ShipmentOrder partnerFeeAmount(BigDecimal partnerFeeAmount) {
+        this.setPartnerFeeAmount(partnerFeeAmount);
+        return this;
+    }
+
+    public void setPartnerFeeAmount(BigDecimal partnerFeeAmount) {
+        this.partnerFeeAmount = partnerFeeAmount;
+    }
+
+    public Integer getPartnerTipUnits() {
+        return partnerTipUnits;
+    }
+
+    public void setPartnerTipUnits(Integer partnerTipUnits) {
+        this.partnerTipUnits = partnerTipUnits;
+    }
+
+    public String getPartnerPayMethod() {
+        return partnerPayMethod;
+    }
+
+    public void setPartnerPayMethod(String partnerPayMethod) {
+        this.partnerPayMethod = partnerPayMethod;
+    }
+
+    public BigDecimal getCodAmount() {
+        return this.codAmount;
+    }
+
+    public void setCodAmount(BigDecimal codAmount) {
+        this.codAmount = codAmount;
+    }
+
+    public BigDecimal getCodFeeAmount() {
+        return this.codFeeAmount;
+    }
+
+    public void setCodFeeAmount(BigDecimal codFeeAmount) {
+        this.codFeeAmount = codFeeAmount;
+    }
+
+    public BigDecimal getCodFeeRefundAmount() {
+        return this.codFeeRefundAmount;
+    }
+
+    public void setCodFeeRefundAmount(BigDecimal codFeeRefundAmount) {
+        this.codFeeRefundAmount = codFeeRefundAmount;
+    }
+
+    public BigDecimal getStorageFeeAmount() {
+        return this.storageFeeAmount;
+    }
+
+    public void setStorageFeeAmount(BigDecimal storageFeeAmount) {
+        this.storageFeeAmount = storageFeeAmount;
+    }
+
+    public BigDecimal getReturnFeeAmount() {
+        return this.returnFeeAmount;
+    }
+
+    public void setReturnFeeAmount(BigDecimal returnFeeAmount) {
+        this.returnFeeAmount = returnFeeAmount;
+    }
+
+    public String getBankName() {
+        return this.bankName;
+    }
+
+    public void setBankName(String bankName) {
+        this.bankName = bankName;
+    }
+
+    public String getBankAccountNo() {
+        return this.bankAccountNo;
+    }
+
+    public void setBankAccountNo(String bankAccountNo) {
+        this.bankAccountNo = bankAccountNo;
+    }
+
+    public String getBankAccountName() {
+        return this.bankAccountName;
+    }
+
+    public void setBankAccountName(String bankAccountName) {
+        this.bankAccountName = bankAccountName;
+    }
+
+    public Boolean getInvoiceRequested() {
+        return this.invoiceRequested;
+    }
+
+    public void setInvoiceRequested(Boolean invoiceRequested) {
+        this.invoiceRequested = invoiceRequested;
+    }
+
+    public Boolean getOnCredit() {
+        return this.onCredit;
+    }
+
+    public void setOnCredit(Boolean onCredit) {
+        this.onCredit = onCredit;
+    }
+
+    public String getInvoiceTaxCode() {
+        return this.invoiceTaxCode;
+    }
+
+    public void setInvoiceTaxCode(String invoiceTaxCode) {
+        this.invoiceTaxCode = invoiceTaxCode;
+    }
+
+    public String getInvoiceCompanyName() {
+        return this.invoiceCompanyName;
+    }
+
+    public void setInvoiceCompanyName(String invoiceCompanyName) {
+        this.invoiceCompanyName = invoiceCompanyName;
+    }
+
+    public String getInvoiceEmail() {
+        return this.invoiceEmail;
+    }
+
+    public void setInvoiceEmail(String invoiceEmail) {
+        this.invoiceEmail = invoiceEmail;
+    }
+
+    public String getInvoiceCompanyAddress() {
+        return this.invoiceCompanyAddress;
+    }
+
+    public void setInvoiceCompanyAddress(String invoiceCompanyAddress) {
+        this.invoiceCompanyAddress = invoiceCompanyAddress;
+    }
+
+    public String getInvoiceBuyerName() {
+        return this.invoiceBuyerName;
+    }
+
+    public void setInvoiceBuyerName(String invoiceBuyerName) {
+        this.invoiceBuyerName = invoiceBuyerName;
+    }
+
+    public String getInvoiceBuyerIdNumber() {
+        return this.invoiceBuyerIdNumber;
+    }
+
+    public void setInvoiceBuyerIdNumber(String invoiceBuyerIdNumber) {
+        this.invoiceBuyerIdNumber = invoiceBuyerIdNumber;
+    }
+
+    public String getInvoiceBuyerPhone() {
+        return this.invoiceBuyerPhone;
+    }
+
+    public void setInvoiceBuyerPhone(String invoiceBuyerPhone) {
+        this.invoiceBuyerPhone = invoiceBuyerPhone;
+    }
+
+    public String getInvoiceRefId() {
+        return this.invoiceRefId;
+    }
+
+    public void setInvoiceRefId(String invoiceRefId) {
+        this.invoiceRefId = invoiceRefId;
+    }
+
+    public String getInvoiceStatus() {
+        return this.invoiceStatus;
+    }
+
+    public void setInvoiceStatus(String invoiceStatus) {
+        this.invoiceStatus = invoiceStatus;
+    }
+
+    public String getInvoiceType() {
+        return this.invoiceType;
+    }
+
+    public void setInvoiceType(String invoiceType) {
+        this.invoiceType = invoiceType;
+    }
+
+    public String getInvoiceTransactionId() {
+        return this.invoiceTransactionId;
+    }
+
+    public void setInvoiceTransactionId(String invoiceTransactionId) {
+        this.invoiceTransactionId = invoiceTransactionId;
+    }
+
+    public String getInvoiceNo() {
+        return this.invoiceNo;
+    }
+
+    public void setInvoiceNo(String invoiceNo) {
+        this.invoiceNo = invoiceNo;
+    }
+
+    public String getInvoiceSeries() {
+        return this.invoiceSeries;
+    }
+
+    public void setInvoiceSeries(String invoiceSeries) {
+        this.invoiceSeries = invoiceSeries;
+    }
+
+    public String getInvoiceCode() {
+        return this.invoiceCode;
+    }
+
+    public void setInvoiceCode(String invoiceCode) {
+        this.invoiceCode = invoiceCode;
+    }
+
+    public BigDecimal getInvoiceGrossAmount() {
+        return this.invoiceGrossAmount;
+    }
+
+    public void setInvoiceGrossAmount(BigDecimal invoiceGrossAmount) {
+        this.invoiceGrossAmount = invoiceGrossAmount;
+    }
+
+    public BigDecimal getInvoiceNetAmount() {
+        return this.invoiceNetAmount;
+    }
+
+    public void setInvoiceNetAmount(BigDecimal invoiceNetAmount) {
+        this.invoiceNetAmount = invoiceNetAmount;
+    }
+
+    public BigDecimal getInvoiceVatAmount() {
+        return this.invoiceVatAmount;
+    }
+
+    public void setInvoiceVatAmount(BigDecimal invoiceVatAmount) {
+        this.invoiceVatAmount = invoiceVatAmount;
+    }
+
+    public Instant getInvoiceIssuedAt() {
+        return this.invoiceIssuedAt;
+    }
+
+    public void setInvoiceIssuedAt(Instant invoiceIssuedAt) {
+        this.invoiceIssuedAt = invoiceIssuedAt;
+    }
+
+    public String getInvoiceError() {
+        return this.invoiceError;
+    }
+
+    public void setInvoiceError(String invoiceError) {
+        this.invoiceError = invoiceError;
+    }
+
+    public Integer getInvoiceRetryCount() {
+        return this.invoiceRetryCount;
+    }
+
+    public void setInvoiceRetryCount(Integer invoiceRetryCount) {
+        this.invoiceRetryCount = invoiceRetryCount;
+    }
+
+    public String getRouteLabel() {
+        return this.routeLabel;
+    }
+
+    public void setRouteLabel(String routeLabel) {
+        this.routeLabel = routeLabel;
+    }
+
+    public String getItineraryLabel() {
+        return this.itineraryLabel;
+    }
+
+    public void setItineraryLabel(String itineraryLabel) {
+        this.itineraryLabel = itineraryLabel;
+    }
+
+    public Instant getCodExportedAt() {
+        return this.codExportedAt;
+    }
+
+    public void setCodExportedAt(Instant codExportedAt) {
+        this.codExportedAt = codExportedAt;
+    }
+
+    public String getCodExportedBy() {
+        return this.codExportedBy;
+    }
+
+    public void setCodExportedBy(String codExportedBy) {
+        this.codExportedBy = codExportedBy;
+    }
+
+    public Instant getTransferPaidAt() {
+        return this.transferPaidAt;
+    }
+
+    public void setTransferPaidAt(Instant transferPaidAt) {
+        this.transferPaidAt = transferPaidAt;
+    }
+
+    public Boolean getTransferSandbox() {
+        return this.transferSandbox;
+    }
+
+    public void setTransferSandbox(Boolean transferSandbox) {
+        this.transferSandbox = transferSandbox;
+    }
+
+    public String getOwnerPhone() {
+        return this.ownerPhone;
+    }
+
+    public void setOwnerPhone(String ownerPhone) {
+        this.ownerPhone = ownerPhone;
+    }
+
+    public BigDecimal getPaidAmount() {
+        return this.paidAmount;
+    }
+
+    public ShipmentOrder paidAmount(BigDecimal paidAmount) {
+        this.setPaidAmount(paidAmount);
+        return this;
+    }
+
+    public void setPaidAmount(BigDecimal paidAmount) {
+        this.paidAmount = paidAmount;
+    }
+
+    public Integer getShelfNumber() {
+        return this.shelfNumber;
+    }
+
+    public ShipmentOrder shelfNumber(Integer shelfNumber) {
+        this.setShelfNumber(shelfNumber);
+        return this;
+    }
+
+    public void setShelfNumber(Integer shelfNumber) {
+        this.shelfNumber = shelfNumber;
+    }
+
+    public String getNote() {
+        return this.note;
+    }
+
+    public ShipmentOrder note(String note) {
+        this.setNote(note);
+        return this;
+    }
+
+    public void setNote(String note) {
+        this.note = note;
+    }
+
+    public String getCancelReason() {
+        return this.cancelReason;
+    }
+
+    public ShipmentOrder cancelReason(String cancelReason) {
+        this.setCancelReason(cancelReason);
+        return this;
+    }
+
+    public void setCancelReason(String cancelReason) {
+        this.cancelReason = cancelReason;
+    }
+
+    public Instant getLabelPrintedAt() {
+        return this.labelPrintedAt;
+    }
+
+    public ShipmentOrder labelPrintedAt(Instant labelPrintedAt) {
+        this.setLabelPrintedAt(labelPrintedAt);
+        return this;
+    }
+
+    public void setLabelPrintedAt(Instant labelPrintedAt) {
+        this.labelPrintedAt = labelPrintedAt;
+    }
+
+    public Integer getLabelReprintCount() {
+        return this.labelReprintCount;
+    }
+
+    public ShipmentOrder labelReprintCount(Integer labelReprintCount) {
+        this.setLabelReprintCount(labelReprintCount);
+        return this;
+    }
+
+    public void setLabelReprintCount(Integer labelReprintCount) {
+        this.labelReprintCount = labelReprintCount;
+    }
+
+    public Integer getFailCount() {
+        return this.failCount;
+    }
+
+    public ShipmentOrder failCount(Integer failCount) {
+        this.setFailCount(failCount);
+        return this;
+    }
+
+    public void setFailCount(Integer failCount) {
+        this.failCount = failCount;
+    }
+
+    public String getPartnerCode() {
+        return this.partnerCode;
+    }
+
+    public ShipmentOrder partnerCode(String partnerCode) {
+        this.setPartnerCode(partnerCode);
+        return this;
+    }
+
+    public void setPartnerCode(String partnerCode) {
+        this.partnerCode = partnerCode;
+    }
+
+    public String getPartnerOrderId() {
+        return partnerOrderId;
+    }
+
+    public void setPartnerOrderId(String partnerOrderId) {
+        this.partnerOrderId = partnerOrderId;
+    }
+
+    public String getPartnerStatus() {
+        return partnerStatus;
+    }
+
+    public void setPartnerStatus(String partnerStatus) {
+        this.partnerStatus = partnerStatus;
+    }
+
+    public String getPartnerSubStatus() {
+        return partnerSubStatus;
+    }
+
+    public void setPartnerSubStatus(String partnerSubStatus) {
+        this.partnerSubStatus = partnerSubStatus;
+    }
+
+    public String getPartnerTrackingUrl() {
+        return partnerTrackingUrl;
+    }
+
+    public void setPartnerTrackingUrl(String partnerTrackingUrl) {
+        this.partnerTrackingUrl = partnerTrackingUrl;
+    }
+
+    public String getPartnerDriverName() {
+        return partnerDriverName;
+    }
+
+    public void setPartnerDriverName(String partnerDriverName) {
+        this.partnerDriverName = partnerDriverName;
+    }
+
+    public String getPartnerDriverPhone() {
+        return partnerDriverPhone;
+    }
+
+    public void setPartnerDriverPhone(String partnerDriverPhone) {
+        this.partnerDriverPhone = partnerDriverPhone;
+    }
+
+    public String getPartnerPodUrl() {
+        return partnerPodUrl;
+    }
+
+    public void setPartnerPodUrl(String partnerPodUrl) {
+        this.partnerPodUrl = partnerPodUrl;
+    }
+
+    public String getPartnerFailReason() {
+        return partnerFailReason;
+    }
+
+    public void setPartnerFailReason(String partnerFailReason) {
+        this.partnerFailReason = partnerFailReason;
+    }
+
+    public Instant getPartnerUpdatedAt() {
+        return partnerUpdatedAt;
+    }
+
+    public void setPartnerUpdatedAt(Instant partnerUpdatedAt) {
+        this.partnerUpdatedAt = partnerUpdatedAt;
+    }
+
+    public BigDecimal getPartnerCodAmount() {
+        return partnerCodAmount;
+    }
+
+    public void setPartnerCodAmount(BigDecimal partnerCodAmount) {
+        this.partnerCodAmount = partnerCodAmount;
+    }
+
+    public Instant getPartnerCodCollectedAt() {
+        return partnerCodCollectedAt;
+    }
+
+    public void setPartnerCodCollectedAt(Instant partnerCodCollectedAt) {
+        this.partnerCodCollectedAt = partnerCodCollectedAt;
+    }
+
+    public String getPartnerCodCollectedBy() {
+        return partnerCodCollectedBy;
+    }
+
+    public void setPartnerCodCollectedBy(String partnerCodCollectedBy) {
+        this.partnerCodCollectedBy = partnerCodCollectedBy;
+    }
+
+    public String getPartnerShipConfirmedBy() {
+        return partnerShipConfirmedBy;
+    }
+
+    public void setPartnerShipConfirmedBy(String partnerShipConfirmedBy) {
+        this.partnerShipConfirmedBy = partnerShipConfirmedBy;
+    }
+
+    public Instant getPartnerShipConfirmedAt() {
+        return partnerShipConfirmedAt;
+    }
+
+    public void setPartnerShipConfirmedAt(Instant partnerShipConfirmedAt) {
+        this.partnerShipConfirmedAt = partnerShipConfirmedAt;
+    }
+
+    public BigDecimal getDeliveryLat() {
+        return deliveryLat;
+    }
+
+    public Shipper getShipper() {
+        return shipper;
+    }
+
+    public void setShipper(Shipper shipper) {
+        this.shipper = shipper;
+    }
+
+    public void setDeliveryLat(BigDecimal deliveryLat) {
+        this.deliveryLat = deliveryLat;
+    }
+
+    public BigDecimal getDeliveryLng() {
+        return deliveryLng;
+    }
+
+    public void setDeliveryLng(BigDecimal deliveryLng) {
+        this.deliveryLng = deliveryLng;
+    }
+
+    public BigDecimal getPaymentPercent() {
+        return this.paymentPercent;
+    }
+
+    public ShipmentOrder paymentPercent(BigDecimal paymentPercent) {
+        this.setPaymentPercent(paymentPercent);
+        return this;
+    }
+
+    public void setPaymentPercent(BigDecimal paymentPercent) {
+        this.paymentPercent = paymentPercent;
+    }
+
+    public Boolean getPublicTrackingAllowed() {
+        return this.publicTrackingAllowed;
+    }
+
+    public ShipmentOrder publicTrackingAllowed(Boolean publicTrackingAllowed) {
+        this.setPublicTrackingAllowed(publicTrackingAllowed);
+        return this;
+    }
+
+    public void setPublicTrackingAllowed(Boolean publicTrackingAllowed) {
+        this.publicTrackingAllowed = publicTrackingAllowed;
+    }
+
+    public String getCreatorDeviceId() {
+        return creatorDeviceId;
+    }
+
+    public void setCreatorDeviceId(String creatorDeviceId) {
+        this.creatorDeviceId = creatorDeviceId;
+    }
+
+    public OrderIssue getIssue() {
+        return this.issue;
+    }
+
+    public void setIssue(OrderIssue orderIssue) {
+        this.issue = orderIssue;
+    }
+
+    public ShipmentOrder issue(OrderIssue orderIssue) {
+        this.setIssue(orderIssue);
+        return this;
+    }
+
+    public OrderReturnRequest getReturnRequest() {
+        return this.returnRequest;
+    }
+
+    public void setReturnRequest(OrderReturnRequest orderReturnRequest) {
+        this.returnRequest = orderReturnRequest;
+    }
+
+    public ShipmentOrder returnRequest(OrderReturnRequest orderReturnRequest) {
+        this.setReturnRequest(orderReturnRequest);
+        return this;
+    }
+
+    public OrderFareAdjustmentRequest getFareAdjustmentRequest() {
+        return this.fareAdjustmentRequest;
+    }
+
+    public void setFareAdjustmentRequest(OrderFareAdjustmentRequest orderFareAdjustmentRequest) {
+        this.fareAdjustmentRequest = orderFareAdjustmentRequest;
+    }
+
+    public ShipmentOrder fareAdjustmentRequest(OrderFareAdjustmentRequest orderFareAdjustmentRequest) {
+        this.setFareAdjustmentRequest(orderFareAdjustmentRequest);
+        return this;
+    }
+
+    public Customer getSenderCustomer() {
+        return this.senderCustomer;
+    }
+
+    public void setSenderCustomer(Customer customer) {
+        this.senderCustomer = customer;
+    }
+
+    public ShipmentOrder senderCustomer(Customer customer) {
+        this.setSenderCustomer(customer);
+        return this;
+    }
+
+    public Office getFromOffice() {
+        return this.fromOffice;
+    }
+
+    public void setFromOffice(Office office) {
+        this.fromOffice = office;
+    }
+
+    public ShipmentOrder fromOffice(Office office) {
+        this.setFromOffice(office);
+        return this;
+    }
+
+    public Office getToOffice() {
+        return this.toOffice;
+    }
+
+    public void setToOffice(Office office) {
+        this.toOffice = office;
+    }
+
+    public ShipmentOrder toOffice(Office office) {
+        this.setToOffice(office);
+        return this;
+    }
+
+    public Office getHubOffice() {
+        return this.hubOffice;
+    }
+
+    public void setHubOffice(Office office) {
+        this.hubOffice = office;
+    }
+
+    public ShipmentOrder hubOffice(Office office) {
+        this.setHubOffice(office);
+        return this;
+    }
+
+    public Office getFinalToOffice() {
+        return this.finalToOffice;
+    }
+
+    public void setFinalToOffice(Office office) {
+        this.finalToOffice = office;
+    }
+
+    public ShipmentOrder finalToOffice(Office office) {
+        this.setFinalToOffice(office);
+        return this;
+    }
+
+    public Trip getCurrentTrip() {
+        return this.currentTrip;
+    }
+
+    public void setCurrentTrip(Trip trip) {
+        this.currentTrip = trip;
+    }
+
+    public ShipmentOrder currentTrip(Trip trip) {
+        this.setCurrentTrip(trip);
+        return this;
+    }
+
+    // jhipster-needle-entity-add-getters-setters - JHipster will add getters and setters here
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof ShipmentOrder)) {
+            return false;
+        }
+        return getId() != null && getId().equals(((ShipmentOrder) o).getId());
+    }
+
+    @Override
+    public int hashCode() {
+        // see https://vladmihalcea.com/how-to-implement-equals-and-hashcode-using-the-jpa-entity-identifier/
+        return getClass().hashCode();
+    }
+
+    // prettier-ignore
+    @Override
+    public String toString() {
+        return "ShipmentOrder{" +
+            "id=" + getId() +
+            ", orderCode='" + getOrderCode() + "'" +
+            ", draftCode='" + getDraftCode() + "'" +
+            ", status='" + getStatus() + "'" +
+            ", forwardStage='" + getForwardStage() + "'" +
+            ", returnStage='" + getReturnStage() + "'" +
+            ", paymentTerm='" + getPaymentTerm() + "'" +
+            ", goodsType='" + getGoodsType() + "'" +
+            ", serviceType='" + getServiceType() + "'" +
+            ", senderName='" + getSenderName() + "'" +
+            ", senderPhone='" + getSenderPhone() + "'" +
+            ", receiverName='" + getReceiverName() + "'" +
+            ", receiverPhone='" + getReceiverPhone() + "'" +
+            ", deliveryAddress='" + getDeliveryAddress() + "'" +
+            ", pickupAddress='" + getPickupAddress() + "'" +
+            ", homePickup='" + getHomePickup() + "'" +
+            ", homeDelivery='" + getHomeDelivery() + "'" +
+            ", qrDropOff='" + getQrDropOff() + "'" +
+            ", pickupStaffUsername='" + getPickupStaffUsername() + "'" +
+            ", pickingAt='" + getPickingAt() + "'" +
+            ", pickedUpAt='" + getPickedUpAt() + "'" +
+            ", receiverActualName='" + getReceiverActualName() + "'" +
+            ", receiverActualPhone='" + getReceiverActualPhone() + "'" +
+            ", weightKg=" + getWeightKg() +
+            ", quantity=" + getQuantity() +
+            ", dimensionsText='" + getDimensionsText() + "'" +
+            ", fareAmount=" + getFareAmount() +
+            ", pickupFeeAmount=" + getPickupFeeAmount() +
+            ", deliveryFeeAmount=" + getDeliveryFeeAmount() +
+            ", partnerFeeAmount=" + getPartnerFeeAmount() +
+            ", paidAmount=" + getPaidAmount() +
+            ", shelfNumber=" + getShelfNumber() +
+            ", note='" + getNote() + "'" +
+            ", cancelReason='" + getCancelReason() + "'" +
+            ", labelPrintedAt='" + getLabelPrintedAt() + "'" +
+            ", labelReprintCount=" + getLabelReprintCount() +
+            ", failCount=" + getFailCount() +
+            ", partnerCode='" + getPartnerCode() + "'" +
+            ", paymentPercent=" + getPaymentPercent() +
+            ", publicTrackingAllowed='" + getPublicTrackingAllowed() + "'" +
+            "}";
+    }
+}

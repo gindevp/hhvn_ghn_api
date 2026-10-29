@@ -1,0 +1,28 @@
+package com.mycompany.myapp.repository;
+
+import com.mycompany.myapp.domain.Office;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.stereotype.Repository;
+
+/**
+ * Spring Data JPA repository for the Office entity.
+ */
+@SuppressWarnings("unused")
+@Repository
+public interface OfficeRepository extends JpaRepository<Office, Long> {
+    Optional<Office> findFirstByCodeOrderByIdAsc(String code);
+
+    Optional<Office> findFirstByCodeIgnoreCaseOrderByIdAsc(String code);
+
+    default Optional<Office> findOneByCode(String code) {
+        return findFirstByCodeOrderByIdAsc(code);
+    }
+
+    default Optional<Office> findOneByCodeIgnoreCase(String code) {
+        if (code == null || code.isBlank()) {
+            return Optional.empty();
+        }
+        return findFirstByCodeIgnoreCaseOrderByIdAsc(code.trim());
+    }
+}

@@ -1,0 +1,179 @@
+package com.mycompany.myapp.service.invoice;
+
+import com.mycompany.myapp.domain.ShipmentOrder;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * Quy tắc xuất HĐĐT theo người trả cước.
+ * <ul>
+ *   <li>Gửi trả (GUI_TRA, kể cả công nợ) và trả chia tỉ lệ (P30_70…): người mua = người gửi.</li>
+ *   <li>Nhận trả / COD: người mua = người nhận.</li>
+ *   <li>Mốc thanh toán: gửi trả = lúc nhập kho gửi ({@code pickedUpAt}); còn lại = lúc giao thành công.</li>
+ *   <li>Hạn = mốc + 3 tiếng và đơn đã hoàn tất (giao thành công / hoàn xong về người gửi): khách yêu cầu HĐ công ty
+ *   trước hạn, hết hạn hệ thống tự xuất. Người gửi hoặc người nhận đã có MST thì xuất doanh nghiệp theo MST đó,
+ *   không xét hình thức thanh toán; không có MST thì xuất cá nhân.</li>
+ * </ul>
+ */
+public final class InvoicePolicy {
+
+    public static final Duration WINDOW = Duration.ofHours(3);
+    /** Job tự xuất chạy theo chu kỳ nên HĐ có thể ra sau hạn vài phút — trễ quá mức này mới tính là xuất muộn. */
+    public static final Duration LATE_GRACE = Duration.ofMinutes(15);
+
+    public static final String TYPE_COMPANY = "COMPANY";
+    public static final String TYPE_PERSONAL = "PERSONAL";
+
+    /** Sự kiện giao thành công (lấy max eventAt). */
+    public static final List<String> DELIVERED_ACTIONS = List.of("POD", "POD_QUAY", "DELIVERED", "TRANSITION_DELIVERED");
+    /** Sự kiện đơn hoàn tất: giao thành công hoặc hoàn xong về người gửi. */
+    public static final List<String> DONE_ACTIONS = List.of(
+        "POD",
+        "POD_QUAY",
+        "DELIVERED",
+        "TRANSITION_DELIVERED",
+        "RT_DONE",
+        "TRANSITION_RETURNED"
+    );
+
+    private InvoicePolicy() {}
+
+    /** Mốc thanh toán = lúc nhập kho gửi chỉ với gửi trả; các hình thức khác thanh toán đủ khi giao. */
+    public static boolean paidAtWarehouseIn(ShipmentOrder order) {
+        return order.getPaymentTerm() == null || order.getPaymentTerm() == PaymentTerm.GUI_TRA;
+    }
+
+    public static boolean senderPays(ShipmentOrder order) {
+        PaymentTerm t = order.getPaymentTerm();
+        return t != PaymentTerm.NHAN_TRA && t != PaymentTerm.COD;
+    }
+
+    public static String payerName(ShipmentOrder order) {
+        return senderPays(order) ? order.getSenderName() : order.getReceiverName();
+    }
+
+    public static String payerPhone(ShipmentOrder order) {
+        return senderPays(order) ? order.getSenderPhone() : order.getReceiverPhone();
+    }
+
+    /** Tên người trên hóa đơn: chữ hoa, gộp khoảng trắng. Rỗng → null. */
+    public static String upperBuyerName(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String t = raw.trim().replaceAll("\\s+", " ");
+        if (t.isEmpty()) {
+            return null;
+        }
+        if (t.length() > 100) {
+            t = t.substring(0, 100).trim();
+        }
+        return t.toUpperCase(Locale.forLanguageTag("vi"));
+    }
+
+    /** Tên đưa vào hóa đơn: tên đã lưu, không có thì tên người trả cước. */
+    public static String buyerPersonName(ShipmentOrder order) {
+        String saved = upperBuyerName(order.getInvoiceBuyerName());
+        if (saved != null) {
+            return saved;
+        }
+        String payer = upperBuyerName(payerName(order));
+        return payer != null ? payer : "KHÁCH LẺ";
+    }
+
+    /** CCCD/CMND: chỉ giữ số. Rỗng → null. Có nhập thì 9 hoặc 12 số. */
+    public static String normalizeBuyerIdNumber(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String digits = raw.replaceAll("\\D", "");
+        if (digits.isEmpty()) {
+            return null;
+        }
+        if (digits.length() != 9 && digits.length() != 12) {
+            throw new IllegalArgumentException("CCCD/CMND phải gồm 9 hoặc 12 chữ số");
+        }
+        return digits;
+    }
+
+    /** SĐT người trên hóa đơn: chỉ giữ số, chuẩn 0… Rỗng → null. */
+    public static String normalizeBuyerPhone(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String digits = raw.replaceAll("\\D", "");
+        if (digits.isEmpty()) {
+            return null;
+        }
+        if (digits.startsWith("84") && digits.length() >= 11) {
+            digits = "0" + digits.substring(2);
+        }
+        if (digits.length() < 9 || digits.length() > 11) {
+            throw new IllegalArgumentException("Số điện thoại trên hóa đơn không hợp lệ");
+        }
+        return digits;
+    }
+
+    /** SĐT đưa vào MISA: ưu tiên số đã lưu trên HĐ, không có thì SĐT người trả (HĐ cá nhân). */
+    public static String buyerPhoneForInvoice(ShipmentOrder order, boolean company) {
+        String saved = order.getInvoiceBuyerPhone();
+        if (saved != null && !saved.isBlank()) {
+            return saved.trim();
+        }
+        if (company) {
+            return "";
+        }
+        String payer = payerPhone(order);
+        return payer != null ? payer.trim() : "";
+    }
+
+    /** Mốc thanh toán; null = chưa tới (chưa nhập kho gửi / chưa giao). */
+    public static Instant paidAt(ShipmentOrder order, Instant deliveredAt) {
+        return paidAtWarehouseIn(order) ? order.getPickedUpAt() : deliveredAt;
+    }
+
+    /** Đơn đã hoàn tất: giao thành công, hoặc đơn hoàn đã trả xong về người gửi. */
+    public static boolean isDone(ShipmentOrder order) {
+        return order.getStatus() == OrderStatus.DELIVERED || order.getStatus() == OrderStatus.RETURNED;
+    }
+
+    /**
+     * Hạn tự xuất (cũng là hạn khách yêu cầu HĐ công ty): mốc thanh toán + 3 tiếng và đơn phải đã hoàn tất.
+     * Gửi trả hoàn tất sau mốc + 3 tiếng thì hạn = lúc hoàn tất; chưa hoàn tất ({@code doneAt} null) → null.
+     */
+    public static Instant deadline(ShipmentOrder order, Instant doneAt) {
+        Instant paid = paidAt(order, doneAt);
+        if (paid == null || doneAt == null) {
+            return null;
+        }
+        Instant d = paid.plus(WINDOW);
+        return doneAt.isAfter(d) ? doneAt : d;
+    }
+
+    public static boolean issuedLate(Instant deadline, Instant issuedAt) {
+        return deadline != null && issuedAt != null && issuedAt.isAfter(deadline.plus(LATE_GRACE));
+    }
+
+    /** Loại HĐ: cột invoice_type; đơn xuất trước khi có cột thì suy từ MST. */
+    public static String typeOf(ShipmentOrder order) {
+        if (order.getInvoiceType() != null && !order.getInvoiceType().isBlank()) {
+            return order.getInvoiceType();
+        }
+        String st = order.getInvoiceStatus();
+        if (st == null || MeInvoiceIssueService.STATUS_SKIPPED.equals(st)) {
+            return null;
+        }
+        return order.getInvoiceTaxCode() != null && !order.getInvoiceTaxCode().isBlank() ? TYPE_COMPANY : TYPE_PERSONAL;
+    }
+
+    /** Có yêu cầu HĐ công ty kèm MST → xuất DN; còn lại xuất cá nhân. */
+    public static String typeToIssue(ShipmentOrder order) {
+        boolean company =
+            Boolean.TRUE.equals(order.getInvoiceRequested()) && order.getInvoiceTaxCode() != null && !order.getInvoiceTaxCode().isBlank();
+        return company ? TYPE_COMPANY : TYPE_PERSONAL;
+    }
+}

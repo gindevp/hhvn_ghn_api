@@ -1,0 +1,298 @@
+package com.mycompany.myapp.service.dto;
+
+import com.mycompany.myapp.config.Constants;
+import com.mycompany.myapp.domain.Authority;
+import com.mycompany.myapp.domain.User;
+import jakarta.validation.constraints.*;
+import java.io.Serializable;
+import java.time.Instant;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+/**
+ * A DTO representing a user, with his authorities.
+ */
+public class AdminUserDTO implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    private Long id;
+
+    @NotBlank
+    @Pattern(regexp = Constants.LOGIN_REGEX)
+    @Size(min = 1, max = 50)
+    private String login;
+
+    @Size(max = 50)
+    private String firstName;
+
+    @Size(max = 50)
+    private String lastName;
+
+    @Email
+    @Size(min = 5, max = 254)
+    private String email;
+
+    @Size(max = 256)
+    private String imageUrl;
+
+    private boolean activated = false;
+
+    @Size(min = 2, max = 10)
+    private String langKey;
+
+    private String createdBy;
+
+    private Instant createdDate;
+
+    private String lastModifiedBy;
+
+    private Instant lastModifiedDate;
+
+    private Set<String> authorities;
+
+    /** Business role from StaffProfile (FE: Q/BX/G/KT/…). Null if no profile. */
+    private String roleCode;
+
+    /** Home office code, or {@code ALL} when scopeAllOffices. Null if no profile. */
+    private String officeCode;
+
+    /** Id VP đang dùng (mã VP có thể trùng). Null khi toàn hệ thống. */
+    private Long officeId;
+
+    /** VP nhân viên được phép chuyển sang, gồm VP đang dùng. Rỗng khi toàn hệ thống. */
+    private java.util.List<com.mycompany.myapp.service.staff.StaffOfficeService.OfficeOption> allowedOffices;
+
+    private String staffCode;
+
+    private String staffDisplayName;
+
+    private Boolean scopeAllOffices;
+
+    /** Permission group (chức danh) code. Falls back to {@link #roleCode} when unassigned. */
+    private String roleGroupCode;
+
+    /** Effective screen permissions: screen key -> Y/R/N. Empty for non-staff accounts. */
+    private Map<String, String> permissions;
+
+    public AdminUserDTO() {
+        // Empty constructor needed for Jackson.
+    }
+
+    public AdminUserDTO(User user) {
+        this.id = user.getId();
+        this.login = user.getLogin();
+        this.firstName = user.getFirstName();
+        this.lastName = user.getLastName();
+        this.email = user.getEmail();
+        this.activated = user.isActivated();
+        this.imageUrl = user.getImageUrl();
+        this.langKey = user.getLangKey();
+        this.createdBy = user.getCreatedBy();
+        this.createdDate = user.getCreatedDate();
+        this.lastModifiedBy = user.getLastModifiedBy();
+        this.lastModifiedDate = user.getLastModifiedDate();
+        this.authorities = user.getAuthorities().stream().map(Authority::getName).collect(Collectors.toSet());
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getLogin() {
+        return login;
+    }
+
+    public void setLogin(String login) {
+        this.login = login;
+    }
+
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
+    }
+
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getImageUrl() {
+        return imageUrl;
+    }
+
+    public void setImageUrl(String imageUrl) {
+        this.imageUrl = imageUrl;
+    }
+
+    public boolean isActivated() {
+        return activated;
+    }
+
+    public void setActivated(boolean activated) {
+        this.activated = activated;
+    }
+
+    public String getLangKey() {
+        return langKey;
+    }
+
+    public void setLangKey(String langKey) {
+        this.langKey = langKey;
+    }
+
+    public String getCreatedBy() {
+        return createdBy;
+    }
+
+    public void setCreatedBy(String createdBy) {
+        this.createdBy = createdBy;
+    }
+
+    public Instant getCreatedDate() {
+        return createdDate;
+    }
+
+    public void setCreatedDate(Instant createdDate) {
+        this.createdDate = createdDate;
+    }
+
+    public String getLastModifiedBy() {
+        return lastModifiedBy;
+    }
+
+    public void setLastModifiedBy(String lastModifiedBy) {
+        this.lastModifiedBy = lastModifiedBy;
+    }
+
+    public Instant getLastModifiedDate() {
+        return lastModifiedDate;
+    }
+
+    public void setLastModifiedDate(Instant lastModifiedDate) {
+        this.lastModifiedDate = lastModifiedDate;
+    }
+
+    public Set<String> getAuthorities() {
+        return authorities;
+    }
+
+    public void setAuthorities(Set<String> authorities) {
+        this.authorities = authorities;
+    }
+
+    public String getRoleCode() {
+        return roleCode;
+    }
+
+    public void setRoleCode(String roleCode) {
+        this.roleCode = roleCode;
+    }
+
+    public String getOfficeCode() {
+        return officeCode;
+    }
+
+    public void setOfficeCode(String officeCode) {
+        this.officeCode = officeCode;
+    }
+
+    public Long getOfficeId() {
+        return officeId;
+    }
+
+    public void setOfficeId(Long officeId) {
+        this.officeId = officeId;
+    }
+
+    public java.util.List<com.mycompany.myapp.service.staff.StaffOfficeService.OfficeOption> getAllowedOffices() {
+        return allowedOffices;
+    }
+
+    public void setAllowedOffices(java.util.List<com.mycompany.myapp.service.staff.StaffOfficeService.OfficeOption> allowedOffices) {
+        this.allowedOffices = allowedOffices;
+    }
+
+    public String getStaffCode() {
+        return staffCode;
+    }
+
+    public void setStaffCode(String staffCode) {
+        this.staffCode = staffCode;
+    }
+
+    public String getStaffDisplayName() {
+        return staffDisplayName;
+    }
+
+    public void setStaffDisplayName(String staffDisplayName) {
+        this.staffDisplayName = staffDisplayName;
+    }
+
+    public Boolean getScopeAllOffices() {
+        return scopeAllOffices;
+    }
+
+    public void setScopeAllOffices(Boolean scopeAllOffices) {
+        this.scopeAllOffices = scopeAllOffices;
+    }
+
+    public String getRoleGroupCode() {
+        return roleGroupCode;
+    }
+
+    public void setRoleGroupCode(String roleGroupCode) {
+        this.roleGroupCode = roleGroupCode;
+    }
+
+    public Map<String, String> getPermissions() {
+        return permissions;
+    }
+
+    public void setPermissions(Map<String, String> permissions) {
+        this.permissions = permissions;
+    }
+
+    // prettier-ignore
+    @Override
+    public String toString() {
+        return "AdminUserDTO{" +
+            "login='" + login + '\'' +
+            ", firstName='" + firstName + '\'' +
+            ", lastName='" + lastName + '\'' +
+            ", email='" + email + '\'' +
+            ", imageUrl='" + imageUrl + '\'' +
+            ", activated=" + activated +
+            ", langKey='" + langKey + '\'' +
+            ", createdBy=" + createdBy +
+            ", createdDate=" + createdDate +
+            ", lastModifiedBy='" + lastModifiedBy + '\'' +
+            ", lastModifiedDate=" + lastModifiedDate +
+            ", authorities=" + authorities +
+            ", roleCode='" + roleCode + '\'' +
+            ", officeCode='" + officeCode + '\'' +
+            ", staffCode='" + staffCode + '\'' +
+            ", staffDisplayName='" + staffDisplayName + '\'' +
+            ", scopeAllOffices=" + scopeAllOffices +
+            "}";
+    }
+}

@@ -1,0 +1,670 @@
+package com.mycompany.myapp.web.rest;
+
+import com.mycompany.myapp.domain.enumeration.ForwardStage;
+import com.mycompany.myapp.domain.enumeration.IssueType;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import com.mycompany.myapp.domain.enumeration.ReturnStage;
+import com.mycompany.myapp.security.SecurityUtils;
+import com.mycompany.myapp.service.config.TrackLookupLimitService;
+import com.mycompany.myapp.service.customer.CustomerAuthService;
+import com.mycompany.myapp.service.customer.CustomerOwnerService;
+import com.mycompany.myapp.service.dto.order.AddPaymentRequest;
+import com.mycompany.myapp.service.dto.order.AssignShipperRequest;
+import com.mycompany.myapp.service.dto.order.CreateDraftOrderRequest;
+import com.mycompany.myapp.service.dto.order.CreateDraftOrderResponse;
+import com.mycompany.myapp.service.dto.order.CreateOrderRequest;
+import com.mycompany.myapp.service.dto.order.FailDeliveryRequest;
+import com.mycompany.myapp.service.dto.order.FailDeliveryResponse;
+import com.mycompany.myapp.service.dto.order.IssueInvoiceRequest;
+import com.mycompany.myapp.service.dto.order.LogOrderEventRequest;
+import com.mycompany.myapp.service.dto.order.MarkCodExportedRequest;
+import com.mycompany.myapp.service.dto.order.OpenIssueRequest;
+import com.mycompany.myapp.service.dto.order.OrderDetailDTO;
+import com.mycompany.myapp.service.dto.order.OrderSummaryDTO;
+import com.mycompany.myapp.service.dto.order.OrderTransitionRequest;
+import com.mycompany.myapp.service.dto.order.OrderTransitionResponse;
+import com.mycompany.myapp.service.dto.order.PatchOrderRequest;
+import com.mycompany.myapp.service.dto.order.PodRequest;
+import com.mycompany.myapp.service.dto.order.PodResponse;
+import com.mycompany.myapp.service.dto.order.ReturnCompleteRequest;
+import com.mycompany.myapp.service.dto.order.TrackOrderRequest;
+import com.mycompany.myapp.service.dto.order.TrackOrderResponse;
+import com.mycompany.myapp.service.dto.trip.AssignOrdersToTripRequest;
+import com.mycompany.myapp.service.dto.trip.TripSummaryDTO;
+import com.mycompany.myapp.service.finance.FinanceFacadeService;
+import com.mycompany.myapp.service.invoice.MeInvoiceIssueService;
+import com.mycompany.myapp.service.invoice.PublicInvoiceService;
+import com.mycompany.myapp.service.order.DeliveryFacadeService;
+import com.mycompany.myapp.service.order.ExceptionFacadeService;
+import com.mycompany.myapp.service.order.OrderFacadeService;
+import com.mycompany.myapp.service.order.PublicSenderLookupService;
+import com.mycompany.myapp.service.partner.AhamoveDispatchService;
+import com.mycompany.myapp.service.partner.GrabDispatchService;
+import com.mycompany.myapp.service.payment.onepay.OnePayAdminService;
+import com.mycompany.myapp.service.payment.onepay.OnePayOrderCollectService;
+import com.mycompany.myapp.service.trip.TripFacadeService;
+import com.mycompany.myapp.web.rest.errors.BadRequestAlertException;
+import jakarta.validation.Valid;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
+import tech.jhipster.web.util.PaginationUtil;
+
+/**
+ * FE-facing order facade at {@code /api/orders} (A-API-08).
+ * Generated CRUD remains at {@code /api/shipment-orders}.
+ */
+@RestController
+@RequestMapping("/api/orders")
+public class OrderFacadeResource {
+
+    private static final Logger LOG = LoggerFactory.getLogger(OrderFacadeResource.class);
+
+    /** Số lần thử lại khi trùng mã đơn do tạo đồng thời (lần cuối để lỗi nổi lên nếu vẫn trùng). */
+    private static final int CREATE_CODE_RETRIES = 2;
+
+    private final OrderFacadeService orderFacadeService;
+    private TrackLookupLimitService trackLookupLimitService;
+
+    @Value("${cpn.mobile-track-key:}")
+    private String mobileTrackKey;
+
+    @Autowired
+    public void setTrackLookupLimitService(TrackLookupLimitService trackLookupLimitService) {
+        this.trackLookupLimitService = trackLookupLimitService;
+    }
+
+    private CustomerAuthService customerAuthService;
+    private CustomerOwnerService customerOwnerService;
+
+    @Autowired
+    public void setCustomerAuthService(CustomerAuthService customerAuthService) {
+        this.customerAuthService = customerAuthService;
+    }
+
+    @Autowired
+    public void setCustomerOwnerService(CustomerOwnerService customerOwnerService) {
+        this.customerOwnerService = customerOwnerService;
+    }
+
+    private final TripFacadeService tripFacadeService;
+    private final DeliveryFacadeService deliveryFacadeService;
+    private final ExceptionFacadeService exceptionFacadeService;
+    private final MeInvoiceIssueService meInvoiceIssueService;
+    private final FinanceFacadeService financeFacadeService;
+    private final PublicInvoiceService publicInvoiceService;
+    private final PublicSenderLookupService publicSenderLookupService;
+    private final AhamoveDispatchService ahamoveDispatchService;
+    private GrabDispatchService grabDispatchService;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setGrabDispatchService(@org.springframework.context.annotation.Lazy GrabDispatchService grabDispatchService) {
+        this.grabDispatchService = grabDispatchService;
+    }
+
+    private final OnePayOrderCollectService onePayOrderCollectService;
+
+    public OrderFacadeResource(
+        OrderFacadeService orderFacadeService,
+        TripFacadeService tripFacadeService,
+        DeliveryFacadeService deliveryFacadeService,
+        ExceptionFacadeService exceptionFacadeService,
+        MeInvoiceIssueService meInvoiceIssueService,
+        FinanceFacadeService financeFacadeService,
+        PublicInvoiceService publicInvoiceService,
+        PublicSenderLookupService publicSenderLookupService,
+        AhamoveDispatchService ahamoveDispatchService,
+        OnePayOrderCollectService onePayOrderCollectService
+    ) {
+        this.publicInvoiceService = publicInvoiceService;
+        this.publicSenderLookupService = publicSenderLookupService;
+        this.financeFacadeService = financeFacadeService;
+        this.orderFacadeService = orderFacadeService;
+        this.tripFacadeService = tripFacadeService;
+        this.deliveryFacadeService = deliveryFacadeService;
+        this.exceptionFacadeService = exceptionFacadeService;
+        this.meInvoiceIssueService = meInvoiceIssueService;
+        this.ahamoveDispatchService = ahamoveDispatchService;
+        this.onePayOrderCollectService = onePayOrderCollectService;
+    }
+
+    @GetMapping("")
+    public ResponseEntity<ListPage> getOrders(
+        @RequestParam(required = false) OrderStatus status,
+        @RequestParam(required = false) String fromOfficeCode,
+        @RequestParam(required = false) String toOfficeCode,
+        @RequestParam(required = false) String receiverOfficeCode,
+        @RequestParam(required = false) String keyword,
+        @RequestParam(required = false) PaymentTerm paymentTerm,
+        @RequestParam(required = false) String createdFrom,
+        @RequestParam(required = false) String createdTo,
+        @RequestParam(required = false) String routeLabel,
+        @RequestParam(required = false) String itineraryLabel,
+        @RequestParam(required = false) List<String> codes,
+        @RequestParam(required = false) String officeCode,
+        @RequestParam(required = false) List<OrderStatus> statuses,
+        @RequestParam(required = false) Integer openOrUpdatedWithinDays,
+        @RequestParam(required = false) String updatedFrom,
+        @RequestParam(required = false) String updatedTo,
+        @RequestParam(required = false) String successOfficeCode,
+        @RequestParam(required = false) Boolean homeDelivery,
+        @RequestParam(defaultValue = "false") boolean searchAllOffices,
+        @RequestParam(required = false) String cancelRequests,
+        @RequestParam(required = false) Boolean codOnly,
+        @RequestParam(required = false) String phoneEndsWith,
+        @RequestParam(required = false) String hubOfficeCode,
+        Pageable pageable
+    ) {
+        LOG.debug("REST request to get orders facade list");
+        OrderFacadeService.CancelRequestMode cancelMode = "only".equalsIgnoreCase(cancelRequests)
+            ? OrderFacadeService.CancelRequestMode.ONLY
+            : "include".equalsIgnoreCase(cancelRequests)
+                ? OrderFacadeService.CancelRequestMode.INCLUDE
+                : OrderFacadeService.CancelRequestMode.HIDE;
+        Page<OrderSummaryDTO> page = orderFacadeService.list(
+            status,
+            fromOfficeCode,
+            toOfficeCode,
+            receiverOfficeCode,
+            keyword,
+            paymentTerm,
+            createdFrom,
+            createdTo,
+            routeLabel,
+            itineraryLabel,
+            codes,
+            new OrderFacadeService.OrderListExtra(
+                officeCode,
+                statuses,
+                openOrUpdatedWithinDays,
+                updatedFrom,
+                updatedTo,
+                successOfficeCode,
+                homeDelivery,
+                searchAllOffices,
+                cancelMode,
+                codOnly,
+                phoneEndsWith,
+                hubOfficeCode
+            ),
+            pageable
+        );
+        HttpHeaders headers = PaginationUtil.generatePaginationHttpHeaders(ServletUriComponentsBuilder.fromCurrentRequest(), page);
+        return ResponseEntity.ok()
+            .headers(headers)
+            .body(new ListPage(page.getContent(), page.getNumber(), page.getSize(), page.getTotalElements()));
+    }
+
+    @PostMapping("/cod/mark-exported")
+    public Map<String, Object> markCodExported(@Valid @RequestBody MarkCodExportedRequest request) {
+        int updated = orderFacadeService.markCodExported(request);
+        return Map.of("updated", updated);
+    }
+
+    @GetMapping("/{orderCode}")
+    public ResponseEntity<OrderDetailDTO> getOrder(
+        @PathVariable String orderCode,
+        @RequestParam(defaultValue = "false") boolean ahamovePhotos
+    ) {
+        if (ahamovePhotos) {
+            ahamoveDispatchService.pullPhotos(orderCode);
+            if (grabDispatchService != null) {
+                grabDispatchService.pullPhotos(orderCode);
+            }
+        }
+        return ResponseEntity.ok(orderFacadeService.getByCode(orderCode));
+    }
+
+    @GetMapping("/{orderCode}/goods-photo")
+    public Map<String, String> goodsPhoto(@PathVariable String orderCode) {
+        String photo = orderFacadeService.goodsPhoto(orderCode);
+        return photo == null ? Map.of() : Map.of("image", photo);
+    }
+
+    /** Ảnh bill / chứng từ chuyển COD — màn Quản lý đơn COD. */
+    @GetMapping("/{orderCode}/cod-bill-photos")
+    public Map<String, Object> codBillPhotos(@PathVariable String orderCode) {
+        return Map.of("images", orderFacadeService.codBillPhotos(orderCode));
+    }
+
+    @PostMapping("/{orderCode}/cod-bill-photos")
+    public Map<String, Object> uploadCodBillPhotos(@PathVariable String orderCode, @RequestBody Map<String, Object> body) {
+        @SuppressWarnings("unchecked")
+        List<String> images = body != null && body.get("images") instanceof List<?> raw
+            ? raw.stream().filter(String.class::isInstance).map(String.class::cast).toList()
+            : List.of();
+        int total = orderFacadeService.uploadCodBillPhotos(orderCode, images);
+        return Map.of("total", total, "hasCodBillPhoto", total > 0);
+    }
+
+    /**
+     * Public guest create — always CONFIRMED + real order code (no DRAFT).
+     * Preferred path for /tao-don.
+     */
+    @PostMapping("/guest")
+    @ResponseStatus(HttpStatus.CREATED)
+    public CreateDraftOrderResponse createGuestOrder(
+        @Valid @RequestBody CreateDraftOrderRequest request,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        LOG.debug("REST request to create public guest order (CONFIRMED)");
+        String owner = customerAuthService == null
+            ? null
+            : customerAuthService.phoneOf(http.getHeader(CustomerPortalResource.TOKEN_HEADER));
+        CreateDraftOrderResponse created = orderFacadeService.createDraft(request, http.getHeader("X-Device-Id"), owner);
+        attachCollect(created, request, http);
+        return created;
+    }
+
+    /** Public /tao-don: khách nhập SĐT của mình → tên người gửi ở đơn gần nhất (giới hạn theo IP). */
+    @PostMapping("/guest/sender-name")
+    public Map<String, Object> guestSenderName(@RequestBody Map<String, String> request, jakarta.servlet.http.HttpServletRequest http) {
+        return publicSenderLookupService.senderName(request != null ? request.get("phone") : null, clientIp(http));
+    }
+
+    /** @deprecated Prefer POST /api/orders/guest — same behavior (CONFIRMED). Kept for old FE. */
+    @PostMapping("/drafts")
+    @ResponseStatus(HttpStatus.CREATED)
+    public CreateDraftOrderResponse createDraft(
+        @Valid @RequestBody CreateDraftOrderRequest request,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        return createGuestOrder(request, http);
+    }
+
+    @PostMapping("")
+    public ResponseEntity<OrderSummaryDTO> createOrder(@Valid @RequestBody CreateOrderRequest request) throws URISyntaxException {
+        LOG.debug("REST request to create confirmed order");
+        OrderSummaryDTO created = createWithCodeRetry(request);
+        return ResponseEntity.created(new URI("/api/orders/" + created.getOrderCode())).body(created);
+    }
+
+    /**
+     * Mã đơn là STT tăng dần theo VP/ngày nên hai quầy tạo cùng lúc có thể tính ra cùng số và vướng unique constraint.
+     * Transaction đã rollback nên phải gọi lại từ ngoài — lần sau đọc được số vừa bị chiếm.
+     */
+    private OrderSummaryDTO createWithCodeRetry(CreateOrderRequest request) {
+        for (int attempt = 0; attempt < CREATE_CODE_RETRIES; attempt++) {
+            try {
+                return orderFacadeService.createConfirmed(request);
+            } catch (DataIntegrityViolationException e) {
+                LOG.warn("Order code collision on create (attempt {}), retrying", attempt + 1);
+            }
+        }
+        return orderFacadeService.createConfirmed(request);
+    }
+
+    @PatchMapping("/{orderCode}")
+    public OrderDetailDTO patchOrder(@PathVariable String orderCode, @RequestBody(required = false) PatchOrderRequest request) {
+        return orderFacadeService.patch(orderCode, request != null ? request : new PatchOrderRequest());
+    }
+
+    @PostMapping("/{orderCode}/payment-term")
+    public OrderDetailDTO changePaymentTerm(
+        @PathVariable String orderCode,
+        @RequestBody(required = false) com.mycompany.myapp.service.dto.order.ChangePaymentTermRequest request
+    ) {
+        return orderFacadeService.changePaymentTerm(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/reroute-destination")
+    public OrderDetailDTO rerouteDestination(
+        @PathVariable String orderCode,
+        @RequestBody(required = false) com.mycompany.myapp.service.dto.order.RerouteDestinationRequest request
+    ) {
+        return orderFacadeService.rerouteDestination(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/events")
+    public OrderDetailDTO logOrderEvent(@PathVariable String orderCode, @Valid @RequestBody LogOrderEventRequest request) {
+        return orderFacadeService.logEvent(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/pickup-start")
+    public OrderDetailDTO pickupStart(@PathVariable String orderCode) {
+        return orderFacadeService.pickupStart(orderCode);
+    }
+
+    @PostMapping("/{orderCode}/warehouse-receive")
+    public OrderDetailDTO warehouseReceive(@PathVariable String orderCode) {
+        return orderFacadeService.warehouseReceive(orderCode);
+    }
+
+    @PostMapping("/{orderCode}/advance-leg")
+    public OrderDetailDTO advanceLeg(@PathVariable String orderCode) {
+        return orderFacadeService.advanceLeg(orderCode);
+    }
+
+    @PostMapping("/{orderCode}/transition")
+    @Transactional
+    public OrderTransitionResponse transition(@PathVariable String orderCode, @Valid @RequestBody OrderTransitionRequest request) {
+        if (request.getToStatus() == OrderStatus.CANCELLED) {
+            financeFacadeService.settleHeldMoneyForCancel(orderCode, request.getDetail());
+        }
+        return orderFacadeService.transition(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/restore")
+    public OrderTransitionResponse restore(@PathVariable String orderCode) {
+        return orderFacadeService.restore(orderCode);
+    }
+
+    @PostMapping("/track")
+    public TrackOrderResponse track(@Valid @RequestBody TrackOrderRequest request, jakarta.servlet.http.HttpServletRequest http) {
+        String serviceKey = http.getHeader("X-Mobile-Track-Key");
+        boolean serviceOwn = mobileTrackKey != null && !mobileTrackKey.isBlank() && mobileTrackKey.equals(serviceKey);
+        boolean ownOrder =
+            serviceOwn || orderFacadeService.exemptOwnDeviceLookup(request.getCode(), request.getPhone(), http.getHeader("X-Device-Id"));
+        if (trackLookupLimitService != null && !ownOrder) {
+            trackLookupLimitService.consume(http.getHeader("X-Device-Id"), clientIp(http));
+        }
+        return orderFacadeService.track(request);
+    }
+
+    /**
+     * Thu hộ OnePay đang bật hay không — public, không tạo VA.
+     * App ẩn QR / «Thanh toán ngay» khi tắt.
+     */
+    @GetMapping("/track/collect-status")
+    public Map<String, Object> trackCollectStatus(
+        @RequestParam(value = "channel", defaultValue = "APP") OnePayAdminService.OrderChannel channel
+    ) {
+        return Map.of("enabled", onePayOrderCollectService.isCollectEnabled(channel));
+    }
+
+    /** Thu cước qua VA. Chỉ mobile_service gọi, bằng khóa nội bộ. */
+    @PostMapping("/track/collect")
+    public Map<String, Object> trackCollect(@RequestBody TrackOrderRequest request, jakarta.servlet.http.HttpServletRequest http) {
+        requireMobileKey(http);
+        return onePayOrderCollectService.view(request.getCode(), request.getPhone(), false, OnePayAdminService.OrderChannel.APP);
+    }
+
+    @PostMapping("/track/collect/refresh")
+    public Map<String, Object> trackCollectRefresh(@RequestBody TrackOrderRequest request, jakarta.servlet.http.HttpServletRequest http) {
+        requireMobileKey(http);
+        return onePayOrderCollectService.view(request.getCode(), request.getPhone(), true, OnePayAdminService.OrderChannel.APP);
+    }
+
+    /**
+     * Web khách (/tao-don, đã hoặc chưa đăng nhập): lấy QR thu cước như app. Chỉ máy đã tạo đơn, hoặc khách đăng nhập là
+     * chủ / người gửi / người nhận — người khác biết mã + SĐT không tạo được VA.
+     */
+    @PostMapping("/guest/collect")
+    public Map<String, Object> guestCollect(
+        @RequestBody TrackOrderRequest request,
+        @RequestParam(value = "refresh", defaultValue = "false") boolean refresh,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        OnePayAdminService.OrderChannel channel = requireGuestOwner(request, http);
+        return onePayOrderCollectService.view(request.getCode(), request.getPhone(), refresh, channel);
+    }
+
+    /**
+     * Tạo VA ngay sau khi đơn đã commit — màn thành công có QR, không chờ thêm một vòng collect.
+     * OnePay lỗi thì bỏ qua; client hỏi collect như cũ.
+     */
+    private void attachCollect(
+        CreateDraftOrderResponse created,
+        CreateDraftOrderRequest request,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        if (created == null || created.getOrderCode() == null || request == null || request.getSenderPhone() == null) {
+            return;
+        }
+        String login = customerAuthService == null
+            ? null
+            : customerAuthService.phoneOf(http.getHeader(CustomerPortalResource.TOKEN_HEADER));
+        OnePayAdminService.OrderChannel channel = login != null
+            ? OnePayAdminService.OrderChannel.CUSTOMER
+            : onePayOrderCollectService.isCollectEnabled(OnePayAdminService.OrderChannel.GUEST)
+                ? OnePayAdminService.OrderChannel.GUEST
+                : OnePayAdminService.OrderChannel.APP;
+        try {
+            created.setCollect(onePayOrderCollectService.view(created.getOrderCode(), request.getSenderPhone(), false, channel));
+        } catch (RuntimeException ignored) {
+            /* đơn đã tạo; QR lấy sau */
+        }
+    }
+
+    /** Khách đăng nhập có quyền với đơn → kênh CUSTOMER; chỉ khớp máy tạo đơn → GUEST. */
+    private OnePayAdminService.OrderChannel requireGuestOwner(TrackOrderRequest request, jakarta.servlet.http.HttpServletRequest http) {
+        if (request == null || request.getCode() == null || request.getPhone() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Thiếu mã đơn hoặc số điện thoại");
+        }
+        String login = customerAuthService == null
+            ? null
+            : customerAuthService.phoneOf(http.getHeader(CustomerPortalResource.TOKEN_HEADER));
+        if (login != null && customerOwnerService.ownedBy(request.getCode(), login)) {
+            return OnePayAdminService.OrderChannel.CUSTOMER;
+        }
+        if (orderFacadeService.exemptOwnDeviceLookup(request.getCode(), request.getPhone(), http.getHeader("X-Device-Id"))) {
+            return OnePayAdminService.OrderChannel.GUEST;
+        }
+        throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Không tìm thấy đơn");
+    }
+
+    /**
+     * mobile_service đồng bộ đơn của tài khoản app: gán chủ cho đơn app (khớp SĐT người gửi) rồi trả mọi đơn có
+     * {@code owner_phone} = SĐT tài khoản (gồm đơn tạo trên web khách). Chỉ gọi bằng khóa nội bộ.
+     */
+    @PostMapping("/track/owner-sync")
+    public List<CustomerOwnerService.OwnedOrder> trackOwnerSync(
+        @RequestBody CustomerOwnerService.SyncRequest request,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        requireMobileKey(http);
+        return customerOwnerService.sync(request);
+    }
+
+    private void requireMobileKey(jakarta.servlet.http.HttpServletRequest http) {
+        String serviceKey = http.getHeader("X-Mobile-Track-Key");
+        if (mobileTrackKey == null || mobileTrackKey.isBlank() || !mobileTrackKey.equals(serviceKey)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Không được tạo mã thu hộ");
+        }
+    }
+
+    /** Tra cứu công khai: khách (người trả cước) tra MST để xuất HĐ công ty. */
+    @PostMapping("/track/invoice/tax-lookup")
+    public Map<String, Object> trackInvoiceTaxLookup(
+        @RequestBody PublicInvoiceService.LookupRequest request,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        return publicInvoiceService.lookupTaxCode(request, clientIp(http));
+    }
+
+    /** Tra cứu công khai: khách yêu cầu HĐ công ty — chưa tới mốc thì lưu, tới mốc trong 3 tiếng thì xuất MISA ngay. */
+    @PostMapping("/track/invoice")
+    public PublicInvoiceService.SubmitResult trackInvoiceSubmit(
+        @RequestBody PublicInvoiceService.SubmitRequest request,
+        jakarta.servlet.http.HttpServletRequest http
+    ) {
+        return publicInvoiceService.submit(request, clientIp(http));
+    }
+
+    private static String clientIp(jakarta.servlet.http.HttpServletRequest http) {
+        String fwd = http.getHeader("X-Forwarded-For");
+        if (fwd != null && !fwd.isBlank()) {
+            return fwd.split(",")[0].trim();
+        }
+        return http.getRemoteAddr();
+    }
+
+    /**
+     * Assign one or many orders to a trip. Path orderCode is included in the batch if not already listed.
+     * Note: {@code @Valid} is intentionally omitted so empty {@code orderCodes} can be filled from the path
+     * before service validation (otherwise Bean Validation rejects {@code @NotEmpty} too early).
+     */
+    @PostMapping("/{orderCode}/assign-trip")
+    public TripSummaryDTO assignTrip(@PathVariable String orderCode, @RequestBody AssignOrdersToTripRequest request) {
+        if (request == null) {
+            throw new BadRequestAlertException("Request body required", "order", "bodyRequired");
+        }
+        if (request.getTripCode() == null || request.getTripCode().isBlank()) {
+            throw new BadRequestAlertException("tripCode is required", "order", "tripCodeRequired");
+        }
+        List<String> codes = new ArrayList<>(request.getOrderCodes() != null ? request.getOrderCodes() : List.of());
+        if (codes.stream().noneMatch(c -> orderCode.equalsIgnoreCase(c))) {
+            codes.add(orderCode);
+        }
+        request.setOrderCodes(codes);
+        return tripFacadeService.assignOrders(request);
+    }
+
+    @PostMapping("/{orderCode}/pod")
+    public PodResponse pod(@PathVariable String orderCode, @Valid @RequestBody PodRequest request) {
+        return deliveryFacadeService.pod(orderCode, request);
+    }
+
+    /** Phát hành HĐĐT MISA thủ công (màn Giao thành công) — chỉ khi đơn DELIVERED, MISA gửi HĐ về email. */
+    @PostMapping("/{orderCode}/invoice/issue")
+    public OrderSummaryDTO issueInvoice(@PathVariable String orderCode, @RequestBody(required = false) IssueInvoiceRequest request) {
+        meInvoiceIssueService.issueManual(orderCode, request, SecurityUtils.getCurrentUserLogin().orElse("system"));
+        return orderFacadeService.getByCode(orderCode);
+    }
+
+    /** Lưu / bỏ thông tin xuất hoá đơn ở mọi trạng thái; đơn đã xuất HĐ thành công thì khoá. */
+    @PutMapping("/{orderCode}/invoice/info")
+    public OrderSummaryDTO saveInvoiceInfo(
+        @PathVariable String orderCode,
+        @RequestBody(required = false) MeInvoiceIssueService.InvoiceInfoRequest request
+    ) {
+        meInvoiceIssueService.saveInfo(orderCode, request, SecurityUtils.getCurrentUserLogin().orElse("system"));
+        return orderFacadeService.getByCode(orderCode);
+    }
+
+    /** Link xem HĐ (TTL ~5 phút theo MISA). */
+    @PostMapping("/{orderCode}/invoice/view")
+    public Map<String, String> invoiceView(@PathVariable String orderCode) {
+        return Map.of("url", meInvoiceIssueService.viewLink(orderCode));
+    }
+
+    /** Tải PDF HĐĐT. */
+    @PostMapping("/{orderCode}/invoice/download")
+    public ResponseEntity<byte[]> invoiceDownload(@PathVariable String orderCode) {
+        byte[] pdf = meInvoiceIssueService.downloadPdf(orderCode);
+        return ResponseEntity.ok()
+            .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"invoice-" + orderCode + ".pdf\"")
+            .header(HttpHeaders.CONTENT_TYPE, "application/pdf")
+            .body(pdf);
+    }
+
+    @PostMapping("/{orderCode}/fail-delivery")
+    public FailDeliveryResponse failDelivery(@PathVariable String orderCode, @Valid @RequestBody FailDeliveryRequest request) {
+        return deliveryFacadeService.failDelivery(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/assign-shipper")
+    public OrderDetailDTO assignShipper(@PathVariable String orderCode, @RequestBody(required = false) AssignShipperRequest request) {
+        return deliveryFacadeService.assignShipper(orderCode, request != null ? request : new AssignShipperRequest());
+    }
+
+    @PostMapping("/{orderCode}/payments")
+    public OrderDetailDTO addPayment(@PathVariable String orderCode, @Valid @RequestBody AddPaymentRequest request) {
+        return deliveryFacadeService.addPayment(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/return-start")
+    public OrderDetailDTO returnStart(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        String reason = body != null ? body.get("reason") : null;
+        return exceptionFacadeService.startReturn(orderCode, reason);
+    }
+
+    /** Admin: huỷ hoàn tại WH_IN — khôi phục status/forward trước khi bắt đầu hoàn. */
+    @PostMapping("/{orderCode}/return-cancel")
+    public OrderDetailDTO returnCancel(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        String note = body != null ? body.get("reason") : null;
+        if (note == null && body != null) {
+            note = body.get("note");
+        }
+        return exceptionFacadeService.cancelReturn(orderCode, note);
+    }
+
+    @PostMapping("/{orderCode}/return-stage")
+    public OrderDetailDTO returnStage(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        ReturnStage stage = parseEnum(ReturnStage.class, body != null ? body.get("returnStage") : null, "returnStage");
+        return exceptionFacadeService.setReturnStage(orderCode, stage);
+    }
+
+    @PostMapping("/{orderCode}/return-complete")
+    public OrderDetailDTO returnComplete(@PathVariable String orderCode, @Valid @RequestBody ReturnCompleteRequest request) {
+        return exceptionFacadeService.completeReturn(orderCode, request);
+    }
+
+    @PostMapping("/{orderCode}/issues")
+    public OrderDetailDTO openIssue(@PathVariable String orderCode, @RequestBody(required = false) OpenIssueRequest body) {
+        String rawType = body != null ? body.getIssueType() : null;
+        IssueType type = rawType == null || rawType.isBlank() ? IssueType.EXCEPTION : parseEnum(IssueType.class, rawType, "issueType");
+        String reason = body != null ? body.getReason() : null;
+        List<String> photos = body != null && body.getPhotos() != null ? body.getPhotos() : List.of();
+        return exceptionFacadeService.openIssue(orderCode, type, reason, photos);
+    }
+
+    @PostMapping("/{orderCode}/issues/resolve")
+    public OrderDetailDTO resolveIssue(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        String note = body != null ? body.get("resolutionNote") : null;
+        return exceptionFacadeService.resolveIssue(orderCode, note);
+    }
+
+    @PostMapping("/{orderCode}/cancel-request/approve")
+    public OrderDetailDTO approveCancelRequest(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        return exceptionFacadeService.approveCancelRequest(orderCode, body != null ? body.get("note") : null);
+    }
+
+    @PostMapping("/{orderCode}/cancel-request/reject")
+    public OrderDetailDTO rejectCancelRequest(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        return exceptionFacadeService.rejectCancelRequest(orderCode, body != null ? body.get("note") : null);
+    }
+
+    @GetMapping("/{orderCode}/issues")
+    public java.util.List<OrderDetailDTO.OrderIssueViewDTO> listIssues(@PathVariable String orderCode) {
+        return exceptionFacadeService.listIssues(orderCode);
+    }
+
+    @GetMapping("/{orderCode}/returns")
+    public java.util.List<OrderDetailDTO.OrderReturnViewDTO> listReturns(@PathVariable String orderCode) {
+        return exceptionFacadeService.listReturns(orderCode);
+    }
+
+    @PostMapping("/{orderCode}/forward-stage")
+    public OrderDetailDTO forwardStage(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
+        ForwardStage stage = parseEnum(ForwardStage.class, body != null ? body.get("forwardStage") : null, "forwardStage");
+        return exceptionFacadeService.setForwardStage(orderCode, stage);
+    }
+
+    private static <E extends Enum<E>> E parseEnum(Class<E> type, String raw, String field) {
+        if (raw == null || raw.isBlank()) {
+            throw new BadRequestAlertException(field + " is required", "order", "invalid" + capitalize(field));
+        }
+        try {
+            return Enum.valueOf(type, raw.trim());
+        } catch (IllegalArgumentException ex) {
+            throw new BadRequestAlertException("Invalid " + field + ": " + raw, "order", "invalid" + capitalize(field));
+        }
+    }
+
+    private static String capitalize(String s) {
+        if (s == null || s.isEmpty()) {
+            return s;
+        }
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    public record ListPage(java.util.List<OrderSummaryDTO> content, int page, int size, long totalElements) {}
+}

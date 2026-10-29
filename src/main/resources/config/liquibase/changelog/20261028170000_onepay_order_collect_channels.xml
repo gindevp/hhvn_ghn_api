@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261028170000-onepay-order-collect-channels" author="cpn">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="onepay_config" columnName="order_collect_app"/>
+            </not>
+        </preConditions>
+        <comment>Bật/tắt QR thu cước đơn theo kênh: app, web khách đăng nhập, web khách ẩn danh.</comment>
+        <addColumn tableName="onepay_config">
+            <column name="order_collect_app" type="boolean" defaultValueBoolean="true">
+                <constraints nullable="false"/>
+            </column>
+            <column name="order_collect_customer" type="boolean" defaultValueBoolean="true">
+                <constraints nullable="false"/>
+            </column>
+            <column name="order_collect_guest" type="boolean" defaultValueBoolean="true">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>

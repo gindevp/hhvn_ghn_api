@@ -1,0 +1,907 @@
+package com.mycompany.myapp.service.trip;
+
+import com.mycompany.myapp.domain.Driver;
+import com.mycompany.myapp.domain.Office;
+import com.mycompany.myapp.domain.OrderEvent;
+import com.mycompany.myapp.domain.Route;
+import com.mycompany.myapp.domain.ShipmentOrder;
+import com.mycompany.myapp.domain.Trip;
+import com.mycompany.myapp.domain.TripOrderAssignment;
+import com.mycompany.myapp.domain.Vehicle;
+import com.mycompany.myapp.domain.enumeration.AssignmentStatus;
+import com.mycompany.myapp.domain.enumeration.ForwardStage;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.TripStatus;
+import com.mycompany.myapp.repository.DriverRepository;
+import com.mycompany.myapp.repository.OfficeRepository;
+import com.mycompany.myapp.repository.OrderEventRepository;
+import com.mycompany.myapp.repository.RouteRepository;
+import com.mycompany.myapp.repository.ShipmentOrderRepository;
+import com.mycompany.myapp.repository.TripOrderAssignmentRepository;
+import com.mycompany.myapp.repository.TripRepository;
+import com.mycompany.myapp.repository.VehicleRepository;
+import com.mycompany.myapp.security.SecurityUtils;
+import com.mycompany.myapp.security.StaffAccessService;
+import com.mycompany.myapp.service.audit.AuditRecorder;
+import com.mycompany.myapp.service.dto.order.OrderTransitionRequest;
+import com.mycompany.myapp.service.dto.trip.AssignOrdersToTripRequest;
+import com.mycompany.myapp.service.dto.trip.CloseTripRequest;
+import com.mycompany.myapp.service.dto.trip.CreateTripRequest;
+import com.mycompany.myapp.service.dto.trip.HandoverRequest;
+import com.mycompany.myapp.service.dto.trip.ScanInRequest;
+import com.mycompany.myapp.service.dto.trip.ScanOutRequest;
+import com.mycompany.myapp.service.dto.trip.TripSummaryDTO;
+import com.mycompany.myapp.service.dto.trip.TripTransitionRequest;
+import com.mycompany.myapp.service.dto.trip.TripTransitionResponse;
+import com.mycompany.myapp.service.order.OrderFacadeService;
+import com.mycompany.myapp.web.rest.errors.BadRequestAlertException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+@Service
+@Transactional
+public class TripFacadeService {
+
+    private static final String ENTITY = "trip";
+
+    private final TripRepository tripRepository;
+    private final TripOrderAssignmentRepository assignmentRepository;
+    private final ShipmentOrderRepository shipmentOrderRepository;
+    private final OfficeRepository officeRepository;
+    private final RouteRepository routeRepository;
+    private final VehicleRepository vehicleRepository;
+    private final DriverRepository driverRepository;
+    private final OrderEventRepository orderEventRepository;
+    private final TripCodeGenerator tripCodeGenerator;
+    private final OrderFacadeService orderFacadeService;
+    private final StaffAccessService staffAccessService;
+    private final AuditRecorder auditRecorder;
+
+    public TripFacadeService(
+        TripRepository tripRepository,
+        TripOrderAssignmentRepository assignmentRepository,
+        ShipmentOrderRepository shipmentOrderRepository,
+        OfficeRepository officeRepository,
+        RouteRepository routeRepository,
+        VehicleRepository vehicleRepository,
+        DriverRepository driverRepository,
+        OrderEventRepository orderEventRepository,
+        TripCodeGenerator tripCodeGenerator,
+        OrderFacadeService orderFacadeService,
+        StaffAccessService staffAccessService,
+        AuditRecorder auditRecorder
+    ) {
+        this.tripRepository = tripRepository;
+        this.assignmentRepository = assignmentRepository;
+        this.shipmentOrderRepository = shipmentOrderRepository;
+        this.officeRepository = officeRepository;
+        this.routeRepository = routeRepository;
+        this.vehicleRepository = vehicleRepository;
+        this.driverRepository = driverRepository;
+        this.orderEventRepository = orderEventRepository;
+        this.tripCodeGenerator = tripCodeGenerator;
+        this.orderFacadeService = orderFacadeService;
+        this.staffAccessService = staffAccessService;
+        this.auditRecorder = auditRecorder;
+    }
+
+    @Transactional(readOnly = true)
+    public Page<TripSummaryDTO> list(TripStatus status, String officeCode, String routeCode, String keyword, Pageable pageable) {
+        Specification<Trip> spec = Specification.where(null);
+        if (status != null) {
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("status"), status));
+        }
+        if (officeCode != null && !officeCode.isBlank()) {
+            spec = spec.and((root, q, cb) -> cb.equal(root.get("office").get("code"), officeCode.trim().toUpperCase()));
+        }
+        if (routeCode != null && !routeCode.isBlank()) {
+            String rc = routeCode.trim();
+            spec = spec.and((root, q, cb) ->
+                cb.or(cb.equal(root.get("route").get("code"), rc.toUpperCase()), cb.equal(root.get("route").get("name"), rc))
+            );
+        }
+        if (keyword != null && !keyword.isBlank()) {
+            String like = "%" + keyword.trim().toLowerCase() + "%";
+            spec = spec.and((root, q, cb) ->
+                cb.or(
+                    cb.like(cb.lower(root.get("tripCode")), like),
+                    cb.like(cb.lower(root.get("vehicle").get("plateNumber")), like),
+                    cb.like(cb.lower(root.get("driver").get("fullName")), like)
+                )
+            );
+        }
+        if (officeCode == null || officeCode.isBlank()) {
+            String scoped = staffAccessService.scopedOfficeCode().orElse(null);
+            if (scoped != null) {
+                spec = spec.and((root, q, cb) -> cb.equal(root.get("office").get("code"), scoped));
+            }
+        }
+        // Không sort thì DB trả chuyến cũ nhất trước — client tìm chuyến đang mở theo trang đầu sẽ hụt, tạo chuyến trùng.
+        Pageable paged = pageable.getSort().isSorted()
+            ? pageable
+            : PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), Sort.by(Sort.Direction.DESC, "id"));
+        return tripRepository.findAll(spec, paged).map(t -> toSummary(t, false));
+    }
+
+    @Transactional(readOnly = true)
+    public TripSummaryDTO getByCode(String tripCode) {
+        return toSummary(requireTrip(tripCode), true);
+    }
+
+    public TripSummaryDTO create(CreateTripRequest req) {
+        Office office = requireOffice(req.getOfficeCode());
+        Route route = resolveRoute(req.getRouteCode());
+        Vehicle vehicle = resolveVehicle(req);
+        Driver driver = resolveDriver(req);
+
+        Trip trip = new Trip();
+        trip.setTripCode(tripCodeGenerator.nextTripCode(office.getCode()));
+        trip.setStatus(TripStatus.CREATED);
+        trip.setDepartAt(req.getDepartAt());
+        trip.setLoadedCount(0);
+        trip.setScannedCount(0);
+        trip.setForceClosed(false);
+        trip.setOffice(office);
+        trip.setRoute(route);
+        trip.setVehicle(vehicle);
+        trip.setDriver(driver);
+        applyItineraryLabel(trip, req.getItineraryLabel());
+        trip = tripRepository.save(trip);
+        auditRecorder.record(
+            "TRIP_CREATE",
+            "Trip",
+            trip.getTripCode(),
+            "xe=" +
+            (vehicle == null ? "-" : vehicle.getPlateNumber() + " (id " + vehicle.getId() + ")") +
+            " · nhập=" +
+            orDash(req.getVehiclePlate()) +
+            " · nguồn=" +
+            orDash(req.getVehicleSource()) +
+            " · CRM=" +
+            orDash(req.getExternalTripId()) +
+            " · tài=" +
+            (driver == null ? "-" : driver.getFullName()) +
+            " · VP=" +
+            office.getCode() +
+            " · giờ=" +
+            req.getDepartAt() +
+            " · lộ trình=" +
+            orDash(req.getItineraryLabel())
+        );
+        return toSummary(trip, false);
+    }
+
+    private static String assignDetail(Trip trip) {
+        String detail = "Chuyến " + trip.getTripCode();
+        if (trip.getVehicle() != null && trip.getVehicle().getPlateNumber() != null) {
+            detail += " · xe " + trip.getVehicle().getPlateNumber();
+        }
+        if (trip.getDriver() != null && trip.getDriver().getFullName() != null) {
+            detail += " · tài " + trip.getDriver().getFullName();
+        }
+        return detail.length() <= 255 ? detail : detail.substring(0, 255);
+    }
+
+    private static String orDash(String s) {
+        return s == null || s.isBlank() ? "-" : s.trim();
+    }
+
+    public TripTransitionResponse transition(String tripCode, TripTransitionRequest req) {
+        Trip trip = requireTrip(tripCode);
+        if (!TripStatusTransitions.canTransition(trip.getStatus(), req.getToStatus())) {
+            throw new BadRequestAlertException(
+                "Invalid trip transition " + trip.getStatus() + " -> " + req.getToStatus(),
+                ENTITY,
+                "invalidtriptransition"
+            );
+        }
+        trip.setStatus(req.getToStatus());
+        if (req.getToStatus() == TripStatus.CLOSED) {
+            trip.setClosedAt(Instant.now());
+        }
+        tripRepository.save(trip);
+        return new TripTransitionResponse(true, trip.getStatus(), trip.getTripCode());
+    }
+
+    public TripSummaryDTO assignOrders(AssignOrdersToTripRequest req) {
+        Trip trip = requireTrip(req.getTripCode());
+        if (trip.getStatus() == TripStatus.CLOSED || trip.getStatus() == TripStatus.CANCELLED) {
+            throw new BadRequestAlertException("Cannot assign to closed/cancelled trip", ENTITY, "tripclosed");
+        }
+        applyItineraryLabel(trip, req.getItineraryLabel());
+        applyDriverNameIfPresent(trip, req.getDriverName());
+        Map<Long, Trip> previousTrips = new LinkedHashMap<>();
+        for (String code : distinct(req.getOrderCodes())) {
+            ShipmentOrder order = requireOrder(code);
+            if (order.getStatus() == OrderStatus.CANCELLED || order.getStatus() == OrderStatus.DELIVERED) {
+                throw new BadRequestAlertException("Order not assignable: " + code, ENTITY, "orderNotAssignable");
+            }
+            orderFacadeService.assertSenderWarehouseReceived(order);
+            boolean alreadyOnTrip =
+                order.getCurrentTrip() != null &&
+                trip.getId() != null &&
+                trip.getId().equals(order.getCurrentTrip().getId()) &&
+                assignmentRepository
+                    .findFirstByTrip_IdAndOrder_IdAndAssignmentStatusNot(trip.getId(), order.getId(), AssignmentStatus.REMOVED)
+                    .isPresent();
+            if (alreadyOnTrip) {
+                continue;
+            }
+            Trip previous = order.getCurrentTrip();
+            boolean moving = previous != null && previous.getId() != null && !previous.getId().equals(trip.getId());
+            if (moving) {
+                ForwardStage stage = order.getForwardStage();
+                boolean waiting = stage == ForwardStage.TRANSFER_PENDING || stage == ForwardStage.WH_IN || stage == null;
+                if (!waiting || order.getStatus() == OrderStatus.IN_TRANSIT) {
+                    throw new BadRequestAlertException(
+                        "Đơn " + code + " không ở Đợi trung chuyển giao — không chuyển xe được",
+                        ENTITY,
+                        "reassignStage"
+                    );
+                }
+                assignmentRepository
+                    .findFirstByTrip_IdAndOrder_IdAndAssignmentStatusNot(previous.getId(), order.getId(), AssignmentStatus.REMOVED)
+                    .ifPresent(a -> {
+                        a.setAssignmentStatus(AssignmentStatus.REMOVED);
+                        a.setRemovedAt(Instant.now());
+                        assignmentRepository.save(a);
+                    });
+                previousTrips.put(previous.getId(), previous);
+            }
+            ensureActiveAssignment(trip, order);
+            order.setCurrentTrip(trip);
+            order.setForwardStage(ForwardStage.TRANSFER_PENDING);
+            shipmentOrderRepository.save(order);
+            if (moving) {
+                String detail = assignDetail(previous) + " → " + assignDetail(trip);
+                appendOrderEvent(order, "REASSIGN_TRIP", detail.length() <= 255 ? detail : detail.substring(0, 255), currentActor());
+            } else {
+                appendOrderEvent(order, "ASSIGN_TRIP", assignDetail(trip), currentActor());
+            }
+        }
+        for (Trip previous : previousTrips.values()) {
+            refreshCounts(previous);
+            tripRepository.save(previous);
+        }
+        refreshCounts(trip);
+        tripRepository.save(trip);
+        return toSummary(trip, true);
+    }
+
+    public TripSummaryDTO scanOut(String tripCode, ScanOutRequest req) {
+        String mode = req.getMode() == null ? "ADD" : req.getMode().trim().toUpperCase();
+        if ("REMOVE".equals(mode)) {
+            return removeScanOut(tripCode, req.getOrderCode());
+        }
+        Trip trip = requireTrip(tripCode);
+        if (trip.getStatus() != TripStatus.CREATED && trip.getStatus() != TripStatus.LOADING) {
+            throw new BadRequestAlertException("Scan-out only in CREATED/LOADING", ENTITY, "scanOutStatus");
+        }
+        if (trip.getStatus() == TripStatus.CREATED) {
+            trip.setStatus(TripStatus.LOADING);
+        }
+        ShipmentOrder order = requireOrder(req.getOrderCode());
+        orderFacadeService.assertSenderWarehouseReceived(order);
+        TripOrderAssignment assignment = ensureActiveAssignment(trip, order);
+        Instant now = Instant.now();
+        assignment.setScannedAt(now);
+        assignment.setLoadedAt(now);
+        assignment.setAssignmentStatus(AssignmentStatus.LOADED);
+        assignment.setRemovedAt(null);
+        assignmentRepository.save(assignment);
+
+        order.setCurrentTrip(trip);
+        // Gán xe chỉ để TRANSFER_PENDING. Quét lên xe phải sang hàng trên xe,
+        // nếu không web vẫn hiện tab Đợi trung chuyển dù lịch sử đã xác nhận lên xe.
+        markLoadedOnTruck(order);
+        shipmentOrderRepository.save(order);
+
+        if (order.getStatus() == OrderStatus.CONFIRMED || order.getStatus() == OrderStatus.WAITING) {
+            OrderTransitionRequest tr = new OrderTransitionRequest();
+            tr.setToStatus(OrderStatus.IN_TRANSIT);
+            tr.setAction("SCAN_OUT");
+            tr.setDetail("Chuyến " + trip.getTripCode());
+            orderFacadeService.transition(order.getOrderCode(), tr);
+        } else if (order.getStatus() != OrderStatus.IN_TRANSIT) {
+            appendOrderEvent(order, "SCAN_OUT", "Chuyến " + trip.getTripCode(), currentActor());
+        }
+
+        refreshCounts(trip);
+        tripRepository.save(trip);
+        return toSummary(trip, true);
+    }
+
+    /** Đơn đã quét lên xe rời tab Đợi trung chuyển giao. Không đụng giai đoạn kho nhận. */
+    private static void markLoadedOnTruck(ShipmentOrder order) {
+        ForwardStage stage = order.getForwardStage();
+        if (stage == null || stage == ForwardStage.PICKED || stage == ForwardStage.WH_IN || stage == ForwardStage.TRANSFER_PENDING) {
+            order.setForwardStage(ForwardStage.TRANSFERRING);
+        }
+    }
+
+    public TripSummaryDTO removeScanOut(String tripCode, String orderCode) {
+        Trip trip = requireTrip(tripCode);
+        ShipmentOrder order = requireOrder(orderCode);
+        TripOrderAssignment assignment = assignmentRepository
+            .findFirstByTrip_IdAndOrder_IdAndAssignmentStatusNot(trip.getId(), order.getId(), AssignmentStatus.REMOVED)
+            .orElseThrow(() -> new BadRequestAlertException("Assignment not found", ENTITY, "assignmentNotFound"));
+        assignment.setAssignmentStatus(AssignmentStatus.REMOVED);
+        assignment.setRemovedAt(Instant.now());
+        assignmentRepository.save(assignment);
+
+        if (order.getCurrentTrip() != null && order.getCurrentTrip().getId().equals(trip.getId())) {
+            order.setCurrentTrip(null);
+            order.setForwardStage(ForwardStage.WH_IN);
+            shipmentOrderRepository.save(order);
+        }
+        if (order.getStatus() == OrderStatus.IN_TRANSIT) {
+            OrderTransitionRequest tr = new OrderTransitionRequest();
+            tr.setToStatus(OrderStatus.WAITING);
+            tr.setAction("SCAN_REMOVE");
+            tr.setDetail("Chuyến " + trip.getTripCode());
+            orderFacadeService.transition(order.getOrderCode(), tr);
+        } else {
+            appendOrderEvent(order, "SCAN_REMOVE", "Chuyến " + trip.getTripCode(), currentActor());
+        }
+        refreshCounts(trip);
+        tripRepository.save(trip);
+        return toSummary(trip, true);
+    }
+
+    /**
+     * VP xếp hàng dỡ đơn đã gán xe / đã ký lên xe về lại kho gửi (quét đủ kiện ở app).
+     * Chặn khi VP nhận đã nhập kho bất kỳ kiện nào — hàng không còn ở kho gửi.
+     */
+    public TripSummaryDTO unloadBack(ScanInRequest req) {
+        ShipmentOrder order = requireOrder(req.getOrderCode());
+        Trip trip = order.getCurrentTrip();
+        if (trip == null) {
+            throw new BadRequestAlertException("Đơn " + order.getOrderCode() + " chưa gán xe", ENTITY, "unloadBackNoTrip");
+        }
+        boolean returning = order.getStatus() == OrderStatus.RETURNING;
+        boolean forwardOk =
+            order.getStatus() == OrderStatus.CONFIRMED ||
+            order.getStatus() == OrderStatus.WAITING ||
+            order.getStatus() == OrderStatus.IN_TRANSIT;
+        ForwardStage stage = order.getForwardStage();
+        boolean stageOk = stage == null || stage == ForwardStage.TRANSFER_PENDING || stage == ForwardStage.TRANSFERRING;
+        if ((!returning && !forwardOk) || !stageOk) {
+            throw new BadRequestAlertException(
+                "Đơn " + order.getOrderCode() + " không ở Đợi trung chuyển giao / Hàng trên xe",
+                ENTITY,
+                "unloadBackStatus"
+            );
+        }
+        if (!returning && hasDestWarehouseIn(order.getNote())) {
+            throw new BadRequestAlertException(
+                "Đơn " + order.getOrderCode() + " đã nhập kho giao một phần — không dỡ về kho gửi được",
+                ENTITY,
+                "unloadBackDestIn"
+            );
+        }
+        String officeCode = req.getOfficeCode() != null ? req.getOfficeCode().trim().toUpperCase() : "";
+        if (!loadOriginOffices(order).contains(officeCode)) {
+            throw new BadRequestAlertException("Chỉ VP xếp hàng lên xe mới được dỡ về kho gửi", ENTITY, "unloadBackOffice");
+        }
+
+        assignmentRepository
+            .findFirstByTrip_IdAndOrder_IdAndAssignmentStatusNot(trip.getId(), order.getId(), AssignmentStatus.REMOVED)
+            .ifPresent(a -> {
+                a.setAssignmentStatus(AssignmentStatus.REMOVED);
+                a.setRemovedAt(Instant.now());
+                assignmentRepository.save(a);
+            });
+        order.setCurrentTrip(null);
+        order.setForwardStage(ForwardStage.WH_IN);
+        if (!returning) {
+            order.setStatus(OrderStatus.CONFIRMED);
+        }
+        order.setNote(stripWarehouseOut(order.getNote()));
+        shipmentOrderRepository.save(order);
+        appendOrderEvent(order, "UNLOAD_BACK", "Chuyến " + trip.getTripCode() + " · VP " + officeCode, currentActor());
+
+        refreshCounts(trip);
+        tripRepository.save(trip);
+        return toSummary(trip, true);
+    }
+
+    private Set<String> loadOriginOffices(ShipmentOrder order) {
+        Set<String> codes = new LinkedHashSet<>();
+        String transit = orderFacadeService.transitLoadOfficeCode(order);
+        if (transit != null) {
+            codes.add(transit.toUpperCase());
+            return codes;
+        }
+        if (order.getStatus() == OrderStatus.RETURNING) {
+            if (order.getToOffice() != null) codes.add(order.getToOffice().getCode());
+            if (order.getFinalToOffice() != null) codes.add(order.getFinalToOffice().getCode());
+        } else if (order.getFromOffice() != null) {
+            codes.add(order.getFromOffice().getCode());
+        }
+        return codes;
+    }
+
+    private static final java.util.regex.Pattern WHIN_SEQS = java.util.regex.Pattern.compile("\\[WHIN\\]\\s*\\d");
+    private static final java.util.regex.Pattern WHOUT_BLOCK = java.util.regex.Pattern.compile("\\[WHOUT\\][\\d,]*\\[/WHOUT\\]\\n?");
+
+    static boolean hasDestWarehouseIn(String note) {
+        return note != null && WHIN_SEQS.matcher(note).find();
+    }
+
+    private static final java.util.regex.Pattern WHIN_BLOCK = java.util.regex.Pattern.compile("\\[WHIN\\][\\d,]*\\[/WHIN\\]\\n?");
+
+    /** Đánh dấu mọi kiện 1..quantity đã nhập kho giao trong note (định dạng FE: [WHIN]1,2[/WHIN]). */
+    static String withAllWarehouseIn(String note, Integer quantity) {
+        int n = quantity != null && quantity > 0 ? quantity : 1;
+        String seqs = java.util.stream.IntStream.rangeClosed(1, n)
+            .mapToObj(String::valueOf)
+            .collect(java.util.stream.Collectors.joining(","));
+        String rest = note == null ? "" : WHIN_BLOCK.matcher(note).replaceAll("").trim();
+        String block = "[WHIN]" + seqs + "[/WHIN]";
+        return rest.isEmpty() ? block : rest + "\n" + block;
+    }
+
+    static String stripWarehouseOut(String note) {
+        if (note == null) return null;
+        String out = WHOUT_BLOCK.matcher(note).replaceAll("").trim();
+        return out.isEmpty() ? null : out;
+    }
+
+    public TripSummaryDTO handover(String tripCode, HandoverRequest req) {
+        Trip trip = requireTrip(tripCode);
+        Instant now = Instant.now();
+        for (String code : distinct(req.getOrderCodes())) {
+            ShipmentOrder order = requireOrder(code);
+            TripOrderAssignment assignment = ensureActiveAssignment(trip, order);
+            assignment.setAssignmentStatus(AssignmentStatus.LOADED);
+            assignment.setLoadedAt(now);
+            if (assignment.getScannedAt() == null) {
+                assignment.setScannedAt(now);
+            }
+            assignmentRepository.save(assignment);
+            order.setCurrentTrip(trip);
+            shipmentOrderRepository.save(order);
+            appendOrderEvent(order, "HANDOVER", "Chuyến " + trip.getTripCode(), currentActor());
+        }
+        refreshCounts(trip);
+        tripRepository.save(trip);
+        return toSummary(trip, true);
+    }
+
+    public TripSummaryDTO scanIn(String tripCodeOrNull, ScanInRequest req) {
+        ShipmentOrder order = requireOrder(req.getOrderCode());
+        Trip trip = null;
+        if (tripCodeOrNull != null && !tripCodeOrNull.isBlank() && !"me".equalsIgnoreCase(tripCodeOrNull)) {
+            trip = requireTrip(tripCodeOrNull);
+        } else if (order.getCurrentTrip() != null) {
+            trip = order.getCurrentTrip();
+        }
+
+        String officeCode = req.getOfficeCode() != null ? req.getOfficeCode().trim().toUpperCase() : null;
+        if (officeCode != null) {
+            String dest = order.getToOffice() != null ? order.getToOffice().getCode() : null;
+            String hub = order.getHubOffice() != null ? order.getHubOffice().getCode() : null;
+            String finalDest = order.getFinalToOffice() != null ? order.getFinalToOffice().getCode() : null;
+            String from = order.getFromOffice() != null ? order.getFromOffice().getCode() : null;
+            boolean returning = order.getStatus() == OrderStatus.RETURNING;
+            // Chiều hoàn: đích nhập kho là VP gửi gốc (fromOffice).
+            // Không còn trung chuyển hub: cho phép to / finalTo (hub chỉ tương thích data cũ).
+            boolean okOffice = returning
+                ? officeCode.equals(from) || officeCode.equals(hub) || officeCode.equals(dest)
+                : officeCode.equals(dest) || officeCode.equals(finalDest) || officeCode.equals(hub);
+            if (!okOffice && !req.isOverrideWrongOffice()) {
+                throw new BadRequestAlertException("Wrong office for order (E-VP-001)", ENTITY, "wrongOffice");
+            }
+        }
+
+        if (trip != null && trip.getStatus() == TripStatus.DEPARTED) {
+            trip.setStatus(TripStatus.UNLOADING);
+            tripRepository.save(trip);
+        }
+
+        String scanOffice = officeCode != null ? officeCode : staffAccessService.scopedOfficeCode().orElse(null);
+        if (orderFacadeService.arriveAtTransitHub(order.getOrderCode(), scanOffice)) {
+            return trip != null ? toSummary(requireTrip(trip.getTripCode()), true) : toSummaryPlaceholder(requireOrder(req.getOrderCode()));
+        }
+
+        // Quét nhập tại VP nhận → AT_DEST (đơn trung chuyển: tới VP trung chuyển đã xử lý ở trên).
+        if (order.getStatus() == OrderStatus.IN_TRANSIT || order.getStatus() == OrderStatus.WAITING) {
+            OrderTransitionRequest tr = new OrderTransitionRequest();
+            tr.setToStatus(OrderStatus.AT_DEST);
+            tr.setAction("SCAN_IN");
+            tr.setDetail(officeCode != null ? "Văn phòng " + officeCode : "Nhập kho giao");
+            orderFacadeService.transition(order.getOrderCode(), tr);
+            // Web/app chỉ gọi khi đã quét đủ kiện; ghi [WHIN] cùng transaction để note không lệch trạng thái khi client lỗi mạng.
+            order = requireOrder(req.getOrderCode());
+            order.setNote(withAllWarehouseIn(order.getNote(), order.getQuantity()));
+            shipmentOrderRepository.save(order);
+        }
+
+        if (req.getShelfNumber() != null) {
+            // reload after possible transition
+            order = requireOrder(req.getOrderCode());
+            order.setShelfNumber(req.getShelfNumber());
+            shipmentOrderRepository.save(order);
+        }
+
+        return trip != null ? toSummary(requireTrip(trip.getTripCode()), true) : toSummaryPlaceholder(order);
+    }
+
+    public TripSummaryDTO close(String tripCode, CloseTripRequest req) {
+        Trip trip = requireTrip(tripCode);
+        boolean force = req != null && req.isForce();
+        if (force) {
+            staffAccessService.requireForceCloseRole();
+        }
+        if (trip.getStatus() == TripStatus.UNLOADING) {
+            trip.setStatus(TripStatus.CLOSED);
+        } else if (
+            force &&
+            (trip.getStatus() == TripStatus.LOADING || trip.getStatus() == TripStatus.DEPARTED || trip.getStatus() == TripStatus.CREATED)
+        ) {
+            trip.setForceClosed(true);
+            trip.setForceCloseReason(req.getReason());
+            trip.setStatus(TripStatus.CLOSED);
+        } else {
+            throw new BadRequestAlertException("Close requires UNLOADING (or force from CREATED/LOADING/DEPARTED)", ENTITY, "closeInvalid");
+        }
+        trip.setClosedAt(Instant.now());
+        tripRepository.save(trip);
+        return toSummary(trip, true);
+    }
+
+    private TripSummaryDTO toSummaryPlaceholder(ShipmentOrder order) {
+        TripSummaryDTO dto = new TripSummaryDTO();
+        dto.setTripCode(order.getCurrentTrip() != null ? order.getCurrentTrip().getTripCode() : null);
+        dto.setStatus(order.getCurrentTrip() != null ? order.getCurrentTrip().getStatus() : null);
+        return dto;
+    }
+
+    private TripOrderAssignment ensureActiveAssignment(Trip trip, ShipmentOrder order) {
+        return assignmentRepository
+            .findFirstByTrip_IdAndOrder_IdAndAssignmentStatusNot(trip.getId(), order.getId(), AssignmentStatus.REMOVED)
+            .orElseGet(() -> {
+                TripOrderAssignment a = new TripOrderAssignment();
+                a.setTrip(trip);
+                a.setOrder(order);
+                a.setAssignmentStatus(AssignmentStatus.SCANNED);
+                return assignmentRepository.save(a);
+            });
+    }
+
+    private void refreshCounts(Trip trip) {
+        long loaded = assignmentRepository.countByTrip_IdAndAssignmentStatus(trip.getId(), AssignmentStatus.LOADED);
+        long scanned = assignmentRepository.countByTrip_IdAndScannedAtIsNotNullAndAssignmentStatusNot(
+            trip.getId(),
+            AssignmentStatus.REMOVED
+        );
+        trip.setLoadedCount((int) loaded);
+        trip.setScannedCount((int) scanned);
+    }
+
+    private TripSummaryDTO toSummary(Trip trip, boolean withAssignments) {
+        TripSummaryDTO dto = new TripSummaryDTO();
+        dto.setId(trip.getId());
+        dto.setTripCode(trip.getTripCode());
+        dto.setStatus(trip.getStatus());
+        dto.setDepartAt(trip.getDepartAt());
+        dto.setClosedAt(trip.getClosedAt());
+        dto.setForceClosed(trip.getForceClosed());
+        dto.setForceCloseReason(trip.getForceCloseReason());
+        dto.setLoadedCount(trip.getLoadedCount());
+        dto.setScannedCount(trip.getScannedCount());
+        dto.setOfficeCode(trip.getOffice() != null ? trip.getOffice().getCode() : null);
+        dto.setItineraryLabel(trip.getItineraryLabel());
+        if (trip.getRoute() != null) {
+            dto.setRouteCode(trip.getRoute().getCode());
+            dto.setRouteName(trip.getRoute().getName());
+        }
+        if (trip.getVehicle() != null) {
+            dto.setVehiclePlate(trip.getVehicle().getPlateNumber());
+        }
+        if (trip.getDriver() != null) {
+            dto.setDriverName(trip.getDriver().getFullName());
+            dto.setDriverCode(trip.getDriver().getDriverCode());
+        }
+        if (withAssignments) {
+            List<TripSummaryDTO.AssignmentView> views = new ArrayList<>();
+            for (TripOrderAssignment a : assignmentRepository.findActiveByTripId(trip.getId())) {
+                TripSummaryDTO.AssignmentView v = new TripSummaryDTO.AssignmentView();
+                v.setOrderCode(a.getOrder() != null ? a.getOrder().getOrderCode() : null);
+                v.setAssignmentStatus(a.getAssignmentStatus());
+                v.setScannedAt(a.getScannedAt());
+                v.setLoadedAt(a.getLoadedAt());
+                views.add(v);
+            }
+            dto.setAssignments(views);
+        }
+        return dto;
+    }
+
+    private Trip requireTrip(String tripCode) {
+        return tripRepository
+            .findOneByTripCode(tripCode.trim())
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Trip not found: " + tripCode));
+    }
+
+    private ShipmentOrder requireOrder(String code) {
+        return shipmentOrderRepository
+            .findOneByOrderCodeOrDraftCode(code.trim())
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found: " + code));
+    }
+
+    private Office requireOffice(String code) {
+        return officeRepository
+            .findOneByCode(code.trim().toUpperCase())
+            .orElseThrow(() -> new BadRequestAlertException("Unknown office: " + code, ENTITY, "officeNotFound"));
+    }
+
+    private void applyItineraryLabel(Trip trip, String label) {
+        if (label == null || label.isBlank()) {
+            return;
+        }
+        String trimmed = label.trim();
+        trip.setItineraryLabel(trimmed.length() <= 160 ? trimmed : trimmed.substring(0, 160));
+    }
+
+    private Route resolveRoute(String routeCodeOrName) {
+        if (routeCodeOrName == null || routeCodeOrName.isBlank()) {
+            return anyExistingRoute()
+                .or(this::createFallbackRoute)
+                .orElseThrow(() -> new BadRequestAlertException("Route required and no office pair to create one", ENTITY, "routeNotFound")
+                );
+        }
+        String raw = routeCodeOrName.trim();
+        String normalized = normalizeRouteKey(raw);
+
+        return routeRepository
+            .findOneByCode(raw.toUpperCase())
+            .or(() -> routeRepository.findOneByCode(normalized))
+            .or(() -> routeRepository.findFirstByNameIgnoreCase(raw))
+            .or(() -> findRouteByOfficePair(normalized))
+            .or(() -> createRouteFromOfficeCodes(normalized))
+            .or(this::anyExistingRoute)
+            .or(this::createFallbackRoute)
+            .orElseThrow(() ->
+                new BadRequestAlertException(
+                    "Unknown route: " + routeCodeOrName + " (normalized=" + normalized + ")",
+                    ENTITY,
+                    "routeNotFound"
+                )
+            );
+    }
+
+    /** A → B / A->B / A to B / A–B → A-B */
+    private static String normalizeRouteKey(String raw) {
+        return raw.trim().replaceAll("(?i)\\s+to\\s+", "-").replaceAll("[\\s]*[→\\-–—>]+[\\s]*", "-").replaceAll("\\s+", "").toUpperCase();
+    }
+
+    private java.util.Optional<Route> findRouteByOfficePair(String normalized) {
+        int dash = normalized.indexOf('-');
+        if (dash <= 0 || dash >= normalized.length() - 1) {
+            return java.util.Optional.empty();
+        }
+        String from = normalized.substring(0, dash);
+        String to = normalized.substring(dash + 1);
+        // Only simple A-B codes; skip multi-segment
+        if (from.isBlank() || to.isBlank() || to.contains("-")) {
+            return java.util.Optional.empty();
+        }
+        return routeRepository.findFirstByFromOffice_CodeIgnoreCaseAndToOffice_CodeIgnoreCase(from, to);
+    }
+
+    /** Demo/Railway often lack Liquibase route seed — create on the fly when both offices exist. */
+    private java.util.Optional<Route> createRouteFromOfficeCodes(String normalized) {
+        int dash = normalized.indexOf('-');
+        if (dash <= 0 || dash >= normalized.length() - 1) {
+            return java.util.Optional.empty();
+        }
+        String fromCode = normalized.substring(0, dash);
+        String toCode = normalized.substring(dash + 1);
+        if (fromCode.isBlank() || toCode.isBlank() || toCode.contains("-")) {
+            return java.util.Optional.empty();
+        }
+        java.util.Optional<Office> from = officeRepository.findOneByCode(fromCode);
+        java.util.Optional<Office> to = officeRepository.findOneByCode(toCode);
+        if (from.isEmpty() || to.isEmpty()) {
+            return java.util.Optional.empty();
+        }
+        String code = normalized.length() <= 30 ? normalized : normalized.substring(0, 30);
+        if (code.length() < 3) {
+            return java.util.Optional.empty();
+        }
+        Route route = new Route();
+        route.setCode(code);
+        route.setName((fromCode + " → " + toCode).length() <= 100 ? fromCode + " → " + toCode : code);
+        route.setActive(true);
+        route.setFromOffice(from.get());
+        route.setToOffice(to.get());
+        Route saved = routeRepository.save(route);
+        return java.util.Optional.of(saved);
+    }
+
+    private java.util.Optional<Route> anyExistingRoute() {
+        java.util.List<Route> all = routeRepository.findAll();
+        return all.stream().filter(r -> Boolean.TRUE.equals(r.getActive())).findFirst().or(() -> all.stream().findFirst());
+    }
+
+    /** Last resort when DB has offices but zero routes (common on Railway without seed). */
+    private java.util.Optional<Route> createFallbackRoute() {
+        java.util.List<Office> offices = officeRepository.findAll();
+        if (offices.size() < 2) {
+            return java.util.Optional.empty();
+        }
+        Office from = offices.get(0);
+        Office to = offices.stream().filter(o -> o.getId() != null && !o.getId().equals(from.getId())).findFirst().orElse(null);
+        if (to == null) {
+            return java.util.Optional.empty();
+        }
+        String code = (from.getCode() + "-" + to.getCode()).toUpperCase();
+        if (code.length() > 30) {
+            code = code.substring(0, 30);
+        }
+        if (code.length() < 3) {
+            code = ("R" + from.getId() + to.getId());
+            if (code.length() > 30) {
+                code = code.substring(0, 30);
+            }
+        }
+        final String routeCode = code;
+        return routeRepository
+            .findOneByCode(routeCode)
+            .or(() -> {
+                Route route = new Route();
+                route.setCode(routeCode);
+                route.setName(from.getCode() + " → " + to.getCode());
+                route.setActive(true);
+                route.setFromOffice(from);
+                route.setToOffice(to);
+                return java.util.Optional.of(routeRepository.save(route));
+            });
+    }
+
+    private Vehicle resolveVehicle(CreateTripRequest req) {
+        if (req.getVehicleId() != null) {
+            return vehicleRepository
+                .findById(req.getVehicleId())
+                .orElseThrow(() -> new BadRequestAlertException("Vehicle not found", ENTITY, "vehicleNotFound"));
+        }
+        if (req.getVehiclePlate() != null && !req.getVehiclePlate().isBlank()) {
+            String plate = req.getVehiclePlate().trim();
+            if (plate.matches("(?i)CH[0-9A-Z]+") || plate.toLowerCase().startsWith("chưa gán")) {
+                return null;
+            }
+            if (!VehiclePlates.isValid(plate)) {
+                auditRecorder.recordRejected(
+                    "TRIP_CREATE_REJECTED",
+                    "Trip",
+                    null,
+                    "biển không hợp lệ \"" +
+                    plate +
+                    "\" · nguồn=" +
+                    orDash(req.getVehicleSource()) +
+                    " · CRM=" +
+                    orDash(req.getExternalTripId()) +
+                    " · VP=" +
+                    orDash(req.getOfficeCode()) +
+                    " · tài=" +
+                    orDash(req.getDriverName())
+                );
+                throw new BadRequestAlertException(
+                    "Biển số không hợp lệ: \"" + plate + "\" (vd 29H88524 hoặc 29H-885.24)",
+                    ENTITY,
+                    "invalidVehiclePlate"
+                );
+            }
+            String normalized = VehiclePlates.normalize(plate);
+            List<Vehicle> matches = vehicleRepository.findByNormalizedPlate(normalized);
+            if (!matches.isEmpty()) {
+                return matches.stream().filter(v -> plate.equalsIgnoreCase(v.getPlateNumber())).findFirst().orElse(matches.get(0));
+            }
+            Vehicle v = new Vehicle();
+            v.setPlateNumber(normalized);
+            v.setCapacityKg(java.math.BigDecimal.valueOf(500));
+            v.setActive(true);
+            v = vehicleRepository.save(v);
+            auditRecorder.record(
+                "VEHICLE_AUTO_CREATE",
+                "Vehicle",
+                v.getId(),
+                "biển=" + v.getPlateNumber() + " · nhập=" + plate + " · nguồn=" + orDash(req.getVehicleSource()) + " · khi tạo chuyến"
+            );
+            return v;
+        }
+        return null;
+    }
+
+    private Driver resolveDriver(CreateTripRequest req) {
+        if (req.getDriverId() != null) {
+            return driverRepository
+                .findById(req.getDriverId())
+                .orElseThrow(() -> new BadRequestAlertException("Driver not found", ENTITY, "driverNotFound"));
+        }
+        if (req.getDriverCode() != null && !req.getDriverCode().isBlank()) {
+            return driverRepository
+                .findOneByDriverCode(req.getDriverCode().trim())
+                .orElseThrow(() -> new BadRequestAlertException("Driver code not found", ENTITY, "driverNotFound"));
+        }
+        return resolveDriverByName(req.getDriverName());
+    }
+
+    /**
+     * Gán xe tái dùng chuyến theo BKS: cập nhật tài xế theo lựa chọn mới (CRM/VTHH),
+     * tránh giữ tên cũ / "Chưa gán tài" trên chuyến đang mở.
+     */
+    private void applyDriverNameIfPresent(Trip trip, String driverName) {
+        Driver next = resolveDriverByName(driverName);
+        if (next == null) {
+            return;
+        }
+        Driver cur = trip.getDriver();
+        if (cur != null && cur.getFullName() != null && cur.getFullName().equalsIgnoreCase(next.getFullName())) {
+            return;
+        }
+        trip.setDriver(next);
+    }
+
+    private Driver resolveDriverByName(String driverName) {
+        if (driverName == null || driverName.isBlank()) {
+            return null;
+        }
+        String name = driverName.trim();
+        if (name.equalsIgnoreCase("Chưa gán tài")) {
+            return null;
+        }
+        return driverRepository
+            .findFirstByFullNameIgnoreCase(name)
+            .orElseGet(() -> {
+                Driver d = new Driver();
+                String code = "VTHK-" + Integer.toHexString(name.toLowerCase().hashCode()).toUpperCase();
+                if (code.length() > 30) {
+                    code = code.substring(0, 30);
+                }
+                d.setDriverCode(code);
+                d.setFullName(name.length() <= 100 ? name : name.substring(0, 100));
+                d.setActive(true);
+                return driverRepository.save(d);
+            });
+    }
+
+    private void appendOrderEvent(ShipmentOrder order, String action, String detail, String actor) {
+        OrderEvent event = new OrderEvent();
+        event.setEventAt(Instant.now());
+        event.setAction(action);
+        event.setDetail(detail);
+        event.setActorUsername(actor == null ? "system" : actor);
+        event.setOrder(order);
+        orderEventRepository.save(event);
+    }
+
+    private static List<String> distinct(List<String> codes) {
+        Set<String> set = new LinkedHashSet<>();
+        for (String c : codes) {
+            if (c != null && !c.isBlank()) {
+                set.add(c.trim());
+            }
+        }
+        return List.copyOf(set);
+    }
+
+    private static String currentActor() {
+        return SecurityUtils.getCurrentUserLogin().orElse("system");
+    }
+}

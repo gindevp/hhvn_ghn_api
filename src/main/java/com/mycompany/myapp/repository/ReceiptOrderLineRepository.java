@@ -1,0 +1,61 @@
+package com.mycompany.myapp.repository;
+
+import com.mycompany.myapp.domain.ReceiptOrderLine;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+/**
+ * Spring Data JPA repository for the ReceiptOrderLine entity.
+ */
+@Repository
+public interface ReceiptOrderLineRepository extends JpaRepository<ReceiptOrderLine, Long> {
+    default Optional<ReceiptOrderLine> findOneWithEagerRelationships(Long id) {
+        return this.findOneWithToOneRelationships(id);
+    }
+
+    default List<ReceiptOrderLine> findAllWithEagerRelationships() {
+        return this.findAllWithToOneRelationships();
+    }
+
+    default Page<ReceiptOrderLine> findAllWithEagerRelationships(Pageable pageable) {
+        return this.findAllWithToOneRelationships(pageable);
+    }
+
+    @Query(
+        value = "select receiptOrderLine from ReceiptOrderLine receiptOrderLine left join fetch receiptOrderLine.receipt left join fetch receiptOrderLine.order",
+        countQuery = "select count(receiptOrderLine) from ReceiptOrderLine receiptOrderLine"
+    )
+    Page<ReceiptOrderLine> findAllWithToOneRelationships(Pageable pageable);
+
+    @Query(
+        "select receiptOrderLine from ReceiptOrderLine receiptOrderLine left join fetch receiptOrderLine.receipt left join fetch receiptOrderLine.order"
+    )
+    List<ReceiptOrderLine> findAllWithToOneRelationships();
+
+    @Query(
+        "select receiptOrderLine from ReceiptOrderLine receiptOrderLine left join fetch receiptOrderLine.receipt left join fetch receiptOrderLine.order where receiptOrderLine.id =:id"
+    )
+    Optional<ReceiptOrderLine> findOneWithToOneRelationships(@Param("id") Long id);
+
+    List<ReceiptOrderLine> findByReceipt_Id(Long receiptId);
+
+    @Query("select l from ReceiptOrderLine l left join fetch l.order where l.receipt.id in :receiptIds")
+    List<ReceiptOrderLine> findByReceiptIdsWithOrder(@Param("receiptIds") Collection<Long> receiptIds);
+
+    boolean existsByOrder_Id(Long orderId);
+
+    /** Đơn đã nằm trong phiếu thu lập từ mốc {@code from} trở đi (tiền đã nộp quỹ). */
+    boolean existsByOrder_IdAndReceipt_CreatedAtGreaterThanEqual(Long orderId, java.time.Instant from);
+
+    /** Hàng: [orderId, sum(amountCollected), portion]. portion null = phiếu cũ chưa tách phần. */
+    @Query(
+        "select receiptOrderLine.order.id, coalesce(sum(receiptOrderLine.amountCollected), 0), receiptOrderLine.portion from ReceiptOrderLine receiptOrderLine where receiptOrderLine.order.id in :orderIds group by receiptOrderLine.order.id, receiptOrderLine.portion"
+    )
+    List<Object[]> sumAmountByOrderIds(@Param("orderIds") Collection<Long> orderIds);
+}

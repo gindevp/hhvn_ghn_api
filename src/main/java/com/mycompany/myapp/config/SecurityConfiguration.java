@@ -1,0 +1,147 @@
+package com.mycompany.myapp.config;
+
+import static org.springframework.security.config.Customizer.withDefaults;
+
+import com.mycompany.myapp.security.*;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint;
+import org.springframework.security.oauth2.server.resource.web.access.BearerTokenAccessDeniedHandler;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.servlet.util.matcher.MvcRequestMatcher;
+import org.springframework.web.servlet.handler.HandlerMappingIntrospector;
+import tech.jhipster.config.JHipsterProperties;
+
+@Configuration
+@EnableMethodSecurity(securedEnabled = true)
+public class SecurityConfiguration {
+
+    private final JHipsterProperties jHipsterProperties;
+
+    public SecurityConfiguration(JHipsterProperties jHipsterProperties) {
+        this.jHipsterProperties = jHipsterProperties;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http, MvcRequestMatcher.Builder mvc) throws Exception {
+        http
+            .cors(withDefaults())
+            .csrf(csrf -> csrf.disable())
+            .authorizeHttpRequests(authz ->
+                // prettier-ignore
+                authz
+                    // SSE: initial request is authorized; async re-dispatch has no bearer context.
+                    .dispatcherTypeMatchers(jakarta.servlet.DispatcherType.ASYNC).permitAll()
+                    .requestMatchers(mvc.pattern("/swagger-ui/**")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/authenticate")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/authenticate")).permitAll()
+                    .requestMatchers(mvc.pattern("/api/register")).permitAll()
+                    .requestMatchers(mvc.pattern("/api/activate")).permitAll()
+                    .requestMatchers(mvc.pattern("/api/account/reset-password/init")).permitAll()
+                    .requestMatchers(mvc.pattern("/api/account/reset-password/finish")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest/sender-name")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest/collect")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/drafts")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track/collect")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track/collect/refresh")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/orders/track/collect-status")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track/owner-sync")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track/invoice")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track/invoice/tax-lookup")).permitAll()
+                    // Public create-order / track: đọc master tuyến · lộ trình · VP (chỉ GET)
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/branches")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/itineraries")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/offices")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/offices/vehicle-itineraries")).permitAll()
+                    // Public create-order: đọc bảng giá / phụ phí để tạm tính cước như NV (chỉ GET)
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/pricing-rules")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/product-price-rules")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/door-fee-rules")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/surcharge-policy")).permitAll()
+                    // Public create-order: tìm địa chỉ + ước tính KM lấy/giao tận nơi
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/geo/**")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/ahamove/estimate-pickup-km")).permitAll()
+                    // App mobile hỏi chính sách phiên bản trước khi đăng nhập
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/mobile/app-version")).permitAll()
+                    // Web/app hỏi trạng thái bảo trì trước khi vào (không cần token)
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/maintenance")).permitAll()
+                    // Ảnh MinIO: thẻ img không gửi JWT, URL có chữ ký hạn dùng
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/media/**")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/session-policy")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/transit-hub-policy")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/office-screen/**")).permitAll()
+                    // Trang khách: OTP SĐT + token khách riêng (X-Customer-Token) — CustomerPortalResource
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/customer/otp/**")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/public/customer/**")).permitAll()
+                    // Webhook Auto Call HHVN: xác thực bằng chữ ký HMAC trong AutoCallResource
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/hhvn/webhook")).permitAll()
+                    // Webhook Auto Call Vtech: xác thực bằng token CPN sinh (AutoCallResource)
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/vtech/webhook")).permitAll()
+                    // Webhook Ahamove: token CPN sinh (?token= hoặc header apikey) — AhamoveDispatchResource
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/ahamove/webhook")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/grab/webhook")).permitAll()
+                    // GapOne ZNS delivery: token query — GapOneWebhookResource (GET probe + POST DN)
+                    .requestMatchers(mvc.pattern(HttpMethod.GET, "/api/public/gapone/webhook")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/gapone/webhook")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.HEAD, "/api/public/gapone/webhook")).permitAll()
+                    // BIDV thu hộ getbill / paybill: IP + API key + checksum — BidvCollectionService
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/bidv/**")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/payment/bidv/getbill")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/payment/bidv/paybill")).permitAll()
+                    // OnePay PayCollect IPN: chữ ký OWS — OnePayIpnService
+                    .requestMatchers(mvc.pattern(HttpMethod.PUT, "/api/public/onepay/ipn")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/public/onepay/ipn")).permitAll()
+                    .requestMatchers(mvc.pattern("/api/admin/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    // Generated domain CRUD must not bypass facade money/status/day-close guards (TASK-007)
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/shipment-orders")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PUT, "/api/shipment-orders/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PATCH, "/api/shipment-orders/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.DELETE, "/api/shipment-orders/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/order-payments")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PUT, "/api/order-payments/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PATCH, "/api/order-payments/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.DELETE, "/api/order-payments/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/order-issues")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PUT, "/api/order-issues/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PATCH, "/api/order-issues/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.DELETE, "/api/order-issues/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/order-legs")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PUT, "/api/order-legs/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.PATCH, "/api/order-legs/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern(HttpMethod.DELETE, "/api/order-legs/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern("/api/**")).authenticated()
+                    .requestMatchers(mvc.pattern("/v3/api-docs/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+                    .requestMatchers(mvc.pattern("/management/health")).permitAll()
+                    .requestMatchers(mvc.pattern("/management/health/**")).permitAll()
+                    .requestMatchers(mvc.pattern("/management/info")).permitAll()
+                    .requestMatchers(mvc.pattern("/management/prometheus")).permitAll()
+                    .requestMatchers(mvc.pattern("/management/**")).hasAuthority(AuthoritiesConstants.ADMIN)
+            )
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .exceptionHandling(exceptions ->
+                exceptions
+                    .authenticationEntryPoint(new BearerTokenAuthenticationEntryPoint())
+                    .accessDeniedHandler(new BearerTokenAccessDeniedHandler())
+            )
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(withDefaults()));
+        return http.build();
+    }
+
+    @Bean
+    MvcRequestMatcher.Builder mvc(HandlerMappingIntrospector introspector) {
+        return new MvcRequestMatcher.Builder(introspector);
+    }
+}

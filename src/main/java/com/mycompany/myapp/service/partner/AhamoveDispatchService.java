@@ -1,0 +1,1423 @@
+package com.mycompany.myapp.service.partner;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.mycompany.myapp.domain.IntegrationConfig;
+import com.mycompany.myapp.domain.Office;
+import com.mycompany.myapp.domain.OrderDeliveryAttempt;
+import com.mycompany.myapp.domain.OrderPayment;
+import com.mycompany.myapp.domain.PartnerFeeExpense;
+import com.mycompany.myapp.domain.ShipmentOrder;
+import com.mycompany.myapp.domain.enumeration.DeliveryAttemptResult;
+import com.mycompany.myapp.domain.enumeration.DeliveryPartner;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import com.mycompany.myapp.repository.IntegrationConfigRepository;
+import com.mycompany.myapp.repository.OrderDeliveryAttemptRepository;
+import com.mycompany.myapp.repository.OrderPaymentRepository;
+import com.mycompany.myapp.repository.PartnerFeeExpenseRepository;
+import com.mycompany.myapp.repository.ReceiptOrderLineRepository;
+import com.mycompany.myapp.repository.ShipmentOrderRepository;
+import com.mycompany.myapp.security.SecurityUtils;
+import com.mycompany.myapp.service.autocall.AutoCallService;
+import com.mycompany.myapp.service.day.DayClosureGuard;
+import com.mycompany.myapp.service.dto.order.FailDeliveryRequest;
+import com.mycompany.myapp.service.dto.order.OrderDetailDTO;
+import com.mycompany.myapp.service.dto.order.OrderTransitionRequest;
+import com.mycompany.myapp.service.dto.order.PodRequest;
+import com.mycompany.myapp.service.order.DeliveryFacadeService;
+import com.mycompany.myapp.service.order.OrderFacadeService;
+import com.mycompany.myapp.service.order.OrderMoney;
+import com.mycompany.myapp.service.order.PartnerAdvance;
+import com.mycompany.myapp.service.order.SurchargeFeeService;
+import com.mycompany.myapp.web.rest.errors.BadRequestAlertException;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.server.ResponseStatusException;
+
+/**
+ * Giao tận nơi qua Ahamove (không COD hàng). Đơn còn nợ cước (người gửi hay người nhận trả) → tài xế ứng cước
+ * ({@code partnerCodAmount}) cho người bàn giao rồi thu lại người nhận; người bàn giao nhận nợ nộp về công ty. Phí Ahamove = chi phí đối tác ({@code partnerFeeAmount}),
+ * không đụng cước khách.
+ */
+@Service
+public class AhamoveDispatchService {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AhamoveDispatchService.class);
+    private static final String ENTITY = "ahamove";
+    public static final String PARTNER_CODE = "AHAMOVE";
+    /** Nhãn ảnh POD: điều phối giao ship trên app, shipper nhận, shipper giao. */
+    public static final String CAPTION_OFFICE = "Điều phối giao ship";
+    public static final String CAPTION_PICKUP = "Shipper nhận";
+    public static final String CAPTION_DROP = "Shipper giao";
+    private static final java.util.Set<String> PARTNER_DONE = java.util.Set.of("CANCELLED", "COMPLETED", "FAILED");
+
+    private static boolean isPickedUpStatus(String status) {
+        if (status == null) {
+            return false;
+        }
+        String key = status.trim().toUpperCase();
+        return "IN PROCESS".equals(key) || "IN_PROCESS".equals(key) || "COMPLETED".equals(key) || "FAILED".equals(key);
+    }
+
+    /** Nhãn tiếng Việt cho status / sub_status Ahamove. Mã lạ giữ nguyên. */
+    static String viStatus(String code) {
+        if (code == null || code.isBlank()) {
+            return "";
+        }
+        return switch (code.trim().toUpperCase()) {
+            case "IDLE" -> "đơn hẹn giờ";
+            case "ASSIGNING" -> "đang tìm tài xế";
+            case "ACCEPTED" -> "tài xế đã nhận";
+            case "CONFIRMING" -> "đang xác nhận";
+            case "PAYING" -> "đang thanh toán";
+            case "IN PROCESS", "IN_PROCESS" -> "tài xế đã lấy hàng";
+            case "COMPLETED" -> "hoàn tất";
+            case "FAILED" -> "giao thất bại";
+            case "CANCELLED" -> "đã hủy";
+            case "BOARDED" -> "sắp tới điểm lấy";
+            case "ARRIVED" -> "đã tới điểm lấy";
+            case "COMPLETING" -> "sắp tới điểm giao";
+            case "IN_RETURN" -> "đang hoàn hàng";
+            case "RETURNED" -> "đã hoàn về người gửi";
+            default -> code.trim();
+        };
+    }
+
+    /** fail_comment / cancel_comment tiếng Anh của Ahamove. Câu không khớp giữ nguyên. */
+    static String viFailReason(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return raw;
+        }
+        String body = raw.trim().replaceFirst("(?i)^ahamove:\\s*", "");
+        String key = body.toLowerCase(java.util.Locale.ROOT);
+        if (key.contains("recipient does not show up")) {
+            return "Người nhận không có mặt";
+        }
+        if (key.contains("cannot contact") || key.contains("could not contact") || key.contains("unable to contact")) {
+            return "Không liên lạc được người nhận";
+        }
+        if (key.contains("does not pick up") || key.contains("does not answer") || key.contains("not answering")) {
+            return "Người nhận không nghe máy";
+        }
+        if (key.contains("reschedul")) {
+            return "Người nhận hẹn giao lại";
+        }
+        if (key.contains("wrong address") || key.contains("incorrect address") || (key.contains("change") && key.contains("address"))) {
+            return "Sai hoặc đổi địa chỉ giao";
+        }
+        if (key.contains("refus")) {
+            return "Người nhận từ chối nhận hàng";
+        }
+        if (key.contains("wrong phone") || key.contains("incorrect phone") || key.contains("invalid phone")) {
+            return "Sai số điện thoại người nhận";
+        }
+        if (key.contains("return to sender") || key.contains("asked to return")) {
+            return "Người gửi yêu cầu hoàn hàng";
+        }
+        if (key.contains("auto cancel, no driver accepted")) {
+            return "Tự hủy vì không có tài xế nhận";
+        }
+        if (key.contains("asked") && key.contains("cancel")) {
+            return "Tài xế yêu cầu hủy";
+        }
+        if (key.contains("waited too long")) {
+            return "Chờ quá lâu";
+        }
+        if (key.contains("too far")) {
+            return "Tài xế quá xa";
+        }
+        return raw.trim();
+    }
+
+    /** Tài xế đã lấy hàng — phí Ahamove phát sinh (huỷ trước lúc này thì không mất phí). */
+    static final java.util.Set<String> PARTNER_PICKED_UP = java.util.Set.of("IN PROCESS", "IN_PROCESS", "COMPLETED", "FAILED");
+
+    static boolean courierPartner(String code) {
+        return "AHAMOVE".equals(code) || "GRAB".equals(code);
+    }
+
+    /** Đơn Ahamove còn chạy bên đối tác (chưa huỷ / giao xong / thất bại) — không được chuyển giao thất bại thủ công. */
+    public static boolean partnerActive(ShipmentOrder order) {
+        if (order == null || !courierPartner(order.getPartnerCode()) || !notBlank(order.getPartnerOrderId())) {
+            return false;
+        }
+        String st = order.getPartnerStatus();
+        return notBlank(st) && !PARTNER_DONE.contains(st.trim().toUpperCase());
+    }
+
+    public static void assertNoActivePartner(ShipmentOrder order) {
+        if (partnerActive(order)) {
+            throw new BadRequestAlertException(
+                "Đơn đang giao đối tác (" + order.getPartnerOrderId() + ") — hủy chuyến đối tác trước khi báo giao không thành công",
+                ENTITY,
+                "ahamoveActive"
+            );
+        }
+    }
+
+    private final ShipmentOrderRepository shipmentOrderRepository;
+    private final IntegrationConfigRepository integrationConfigRepository;
+    private final OrderDeliveryAttemptRepository deliveryAttemptRepository;
+    private final AhamoveOrderClient ahamoveOrderClient;
+    private final DeliveryFacadeService deliveryFacadeService;
+    private final OrderFacadeService orderFacadeService;
+    private final DayClosureGuard dayClosureGuard;
+    private final OrderPaymentRepository orderPaymentRepository;
+    private final ReceiptOrderLineRepository receiptOrderLineRepository;
+    private final PartnerFeeExpenseRepository partnerFeeExpenseRepository;
+    private final TransactionTemplate tx;
+
+    public AhamoveDispatchService(
+        ShipmentOrderRepository shipmentOrderRepository,
+        IntegrationConfigRepository integrationConfigRepository,
+        OrderDeliveryAttemptRepository deliveryAttemptRepository,
+        AhamoveOrderClient ahamoveOrderClient,
+        DeliveryFacadeService deliveryFacadeService,
+        OrderFacadeService orderFacadeService,
+        DayClosureGuard dayClosureGuard,
+        OrderPaymentRepository orderPaymentRepository,
+        ReceiptOrderLineRepository receiptOrderLineRepository,
+        PartnerFeeExpenseRepository partnerFeeExpenseRepository,
+        PlatformTransactionManager transactionManager
+    ) {
+        this.partnerFeeExpenseRepository = partnerFeeExpenseRepository;
+        this.orderPaymentRepository = orderPaymentRepository;
+        this.receiptOrderLineRepository = receiptOrderLineRepository;
+        this.shipmentOrderRepository = shipmentOrderRepository;
+        this.integrationConfigRepository = integrationConfigRepository;
+        this.deliveryAttemptRepository = deliveryAttemptRepository;
+        this.ahamoveOrderClient = ahamoveOrderClient;
+        this.deliveryFacadeService = deliveryFacadeService;
+        this.orderFacadeService = orderFacadeService;
+        this.dayClosureGuard = dayClosureGuard;
+        this.tx = new TransactionTemplate(transactionManager);
+    }
+
+    private SurchargeFeeService surchargeFeeService;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setSurchargeFeeService(SurchargeFeeService surchargeFeeService) {
+        this.surchargeFeeService = surchargeFeeService;
+    }
+
+    public static class DispatchRequest {
+
+        private Double lat;
+        private Double lng;
+        private String address;
+        private String remarks;
+        /** Rỗng = tiêu chuẩn. {@code TIER_2}/{@code TIER_3}/{@code TIER_4} = phụ phí cồng kềnh NV chọn. Null = tự xét theo kiện. */
+        private String bulkyTier;
+        /** Số suất tip, 0–6. Null = không tip. */
+        private Integer tipUnits;
+
+        public Double getLat() {
+            return lat;
+        }
+
+        public void setLat(Double lat) {
+            this.lat = lat;
+        }
+
+        public Double getLng() {
+            return lng;
+        }
+
+        public void setLng(Double lng) {
+            this.lng = lng;
+        }
+
+        public String getAddress() {
+            return address;
+        }
+
+        public void setAddress(String address) {
+            this.address = address;
+        }
+
+        public String getRemarks() {
+            return remarks;
+        }
+
+        public void setRemarks(String remarks) {
+            this.remarks = remarks;
+        }
+
+        public String getBulkyTier() {
+            return bulkyTier;
+        }
+
+        public void setBulkyTier(String bulkyTier) {
+            this.bulkyTier = bulkyTier;
+        }
+
+        public Integer getTipUnits() {
+            return tipUnits;
+        }
+
+        public void setTipUnits(Integer tipUnits) {
+            this.tipUnits = tipUnits;
+        }
+    }
+
+    /** App: ảnh điều phối + số thứ tự kiện đã quét. */
+    public static class ShipHandoverRequest {
+
+        private List<String> photos = new ArrayList<>();
+        private List<Integer> packageSeqs = new ArrayList<>();
+
+        public List<String> getPhotos() {
+            return photos;
+        }
+
+        public void setPhotos(List<String> photos) {
+            this.photos = photos;
+        }
+
+        public List<Integer> getPackageSeqs() {
+            return packageSeqs;
+        }
+
+        public void setPackageSeqs(List<Integer> packageSeqs) {
+            this.packageSeqs = packageSeqs;
+        }
+    }
+
+    /** Gọi Ahamove giao đơn. Đơn ở nguyên kho giao / giao thất bại cho tới khi tài xế lấy hàng (IN PROCESS). */
+    public OrderDetailDTO dispatch(String orderCode, DispatchRequest request) {
+        final DispatchRequest req = request != null ? request : new DispatchRequest();
+        if ((req.getLat() == null) != (req.getLng() == null)) {
+            throw new BadRequestAlertException("Toạ độ giao thiếu lat hoặc lng", ENTITY, "ahamovePinInvalid");
+        }
+        // Phí tồn kho tăng theo giờ nhập kho, không theo lượt cập nhật 00:10 — tính lại để số tài xế ứng đủ cước.
+        if (surchargeFeeService != null) {
+            surchargeFeeService.refreshStorageFee(requireOrder(orderCode));
+        }
+        ShipmentOrder order = requireOrder(orderCode);
+        Dispatchable ok = assertDispatchable(order);
+        Office pickupOffice = ok.office();
+        BigDecimal advance = ok.advance();
+        IntegrationConfig cfg = integrationConfigRepository.findAll().stream().findFirst().orElse(null);
+        String accountMobile = cfg != null ? AhamoveAuthClient.normalizeMobile(cfg.getAhamoveMobile()) : null;
+        if (accountMobile == null) {
+            throw new BadRequestAlertException("Chưa cấu hình SĐT tài khoản Ahamove (Tích hợp)", ENTITY, "ahamoveMobileMissing");
+        }
+        String senderMobile = cfg != null ? AhamoveAuthClient.normalizeMobile(cfg.getAhamoveSenderMobile()) : null;
+        String pickupMobile = senderMobile != null ? senderMobile : accountMobile;
+        String paymentMethod = cfg.getAhamovePaymentMethod() != null ? cfg.getAhamovePaymentMethod() : "BALANCE";
+        String dropAddress = notBlank(req.getAddress()) ? req.getAddress().trim() : order.getDeliveryAddress();
+        if (!notBlank(dropAddress)) {
+            throw new BadRequestAlertException("Đơn chưa có địa chỉ giao", ENTITY, "ahamoveAddressMissing");
+        }
+
+        AhamoveOrderClient.Stop pickup = new AhamoveOrderClient.Stop(
+            pickupOffice.getLatitude().doubleValue(),
+            pickupOffice.getLongitude().doubleValue(),
+            notBlank(pickupOffice.getAddress()) ? pickupOffice.getAddress() : pickupOffice.getName(),
+            "CPN " + pickupOffice.getName(),
+            pickupMobile,
+            null,
+            order.getOrderCode(),
+            0L
+        );
+        AhamoveOrderClient.Stop drop = new AhamoveOrderClient.Stop(
+            req.getLat(),
+            req.getLng(),
+            dropAddress,
+            order.getReceiverName(),
+            order.getReceiverPhone(),
+            req.getRemarks(),
+            order.getOrderCode(),
+            advance.longValue()
+        );
+        AhamoveCargo cargo = cargoOf(order, req);
+        cargo.assertFitsBike();
+        AhamoveOrderClient.CreatedOrder created = ahamoveOrderClient.createOrder(pickup, drop, paymentMethod, cargo);
+
+        String actor = currentActor();
+        try {
+            tx.executeWithoutResult(status -> saveDispatched(order.getOrderCode(), created, req, advance, actor, paymentMethod));
+        } catch (RuntimeException e) {
+            LOG.warn("Ahamove dispatch: lưu DB lỗi sau khi tạo đơn {} — hủy đơn Ahamove: {}", created.orderId(), e.getMessage());
+            try {
+                ahamoveOrderClient.cancelOrder(created.orderId(), "CPN lỗi hệ thống — hủy tự động");
+            } catch (RuntimeException ce) {
+                LOG.error("Ahamove dispatch: hủy đơn {} thất bại — cần hủy tay trên Ahamove", created.orderId(), ce);
+            }
+            throw e;
+        }
+        return orderFacadeService.getByCode(order.getOrderCode());
+    }
+
+    /**
+     * Gọi Ahamove lấy hàng tận nơi: điểm lấy là địa chỉ người gửi, điểm giao là VP gửi.
+     * Người nhận trả cước nên tài xế không ứng tiền. Đơn ở tab Chờ lấy cho tới khi tài xế đã lấy hàng.
+     */
+    public OrderDetailDTO dispatchPickup(String orderCode, DispatchRequest request) {
+        final DispatchRequest req = request != null ? request : new DispatchRequest();
+        if ((req.getLat() == null) != (req.getLng() == null)) {
+            throw new BadRequestAlertException("Toạ độ lấy thiếu lat hoặc lng", ENTITY, "ahamovePinInvalid");
+        }
+        ShipmentOrder order = requireOrder(orderCode);
+        Office office = assertPickupDispatchable(order);
+        IntegrationConfig cfg = integrationConfigRepository.findAll().stream().findFirst().orElse(null);
+        String accountMobile = cfg != null ? AhamoveAuthClient.normalizeMobile(cfg.getAhamoveMobile()) : null;
+        if (accountMobile == null) {
+            throw new BadRequestAlertException("Chưa cấu hình SĐT tài khoản Ahamove (Tích hợp)", ENTITY, "ahamoveMobileMissing");
+        }
+        String senderMobile = cfg != null ? AhamoveAuthClient.normalizeMobile(cfg.getAhamoveSenderMobile()) : null;
+        String officeMobile = senderMobile != null ? senderMobile : accountMobile;
+        String paymentMethod = cfg.getAhamovePaymentMethod() != null ? cfg.getAhamovePaymentMethod() : "BALANCE";
+        String pickupAddress = notBlank(req.getAddress()) ? req.getAddress().trim() : order.getPickupAddress();
+        if (!notBlank(pickupAddress)) {
+            throw new BadRequestAlertException("Đơn chưa có địa chỉ lấy", ENTITY, "ahamoveAddressMissing");
+        }
+        AhamoveOrderClient.Stop pickup = new AhamoveOrderClient.Stop(
+            req.getLat(),
+            req.getLng(),
+            pickupAddress,
+            order.getSenderName(),
+            order.getSenderPhone(),
+            req.getRemarks(),
+            order.getOrderCode(),
+            0L
+        );
+        AhamoveOrderClient.Stop drop = new AhamoveOrderClient.Stop(
+            office.getLatitude().doubleValue(),
+            office.getLongitude().doubleValue(),
+            notBlank(office.getAddress()) ? office.getAddress() : office.getName(),
+            "CPN " + office.getName(),
+            officeMobile,
+            null,
+            order.getOrderCode(),
+            0L
+        );
+        AhamoveCargo cargo = cargoOf(order, req);
+        cargo.assertFitsBike();
+        AhamoveOrderClient.CreatedOrder created = ahamoveOrderClient.createOrder(pickup, drop, paymentMethod, cargo);
+        String actor = currentActor();
+        try {
+            tx.executeWithoutResult(status -> savePickupDispatched(order.getOrderCode(), created, req, actor, paymentMethod));
+        } catch (RuntimeException e) {
+            LOG.warn("Ahamove lấy hàng: lưu DB lỗi sau khi tạo đơn {} — hủy đơn Ahamove: {}", created.orderId(), e.getMessage());
+            try {
+                ahamoveOrderClient.cancelOrder(created.orderId(), "CPN lỗi hệ thống — hủy tự động");
+            } catch (RuntimeException ce) {
+                LOG.error("Ahamove lấy hàng: hủy đơn {} thất bại — cần hủy tay trên Ahamove", created.orderId(), ce);
+            }
+            throw e;
+        }
+        return orderFacadeService.getByCode(order.getOrderCode());
+    }
+
+    /**
+     * Hủy đơn Ahamove khi tài xế chưa lấy hàng.
+     * Chưa sang Đang giao thì đơn ở lại tab cũ. Đã lấy hàng thì về giao thất bại.
+     */
+    public OrderDetailDTO cancel(String orderCode, String reason) {
+        ShipmentOrder order = requireOrder(orderCode);
+        dayClosureGuard.assertOrderMutable(order);
+        if (!PARTNER_CODE.equals(order.getPartnerCode()) || !notBlank(order.getPartnerOrderId())) {
+            throw new BadRequestAlertException("Đơn không giao qua Ahamove", ENTITY, "ahamoveNotDispatched");
+        }
+        OrderStatus st = order.getStatus();
+        boolean waitingPickup =
+            st == OrderStatus.AT_DEST ||
+            st == OrderStatus.FAILED_DELIVERY ||
+            (Boolean.TRUE.equals(order.getHomePickup()) &&
+                order.getPickedUpAt() == null &&
+                (st == OrderStatus.CONFIRMED || st == OrderStatus.WAITING));
+        if (st != OrderStatus.OUT_FOR_DELIVERY && !waitingPickup) {
+            throw new BadRequestAlertException("Chỉ hủy khi tài xế chưa lấy hàng hoặc đơn đang giao", ENTITY, "ahamoveCancelStatus");
+        }
+        String comment = notBlank(reason) ? reason.trim() : "CPN hủy giao";
+        ahamoveOrderClient.cancelOrder(order.getPartnerOrderId(), comment);
+        String actor = currentActor();
+        tx.executeWithoutResult(status -> markCancelled(order.getOrderCode(), comment, actor));
+        return orderFacadeService.getByCode(order.getOrderCode());
+    }
+
+    /**
+     * Callback Ahamove (POST toàn bộ order JSON). Luôn lưu thông tin đối tác; chuyển trạng thái CPN khi:
+     * giao xong có ảnh → POD tự động; giao thất bại → fail delivery; Ahamove hủy → FAILED_DELIVERY.
+     *
+     * @return mã đơn CPN, hoặc empty nếu không khớp đơn nào.
+     */
+    public Optional<String> applyWebhook(JsonNode body) {
+        WebhookUpdate u = parseWebhook(body);
+        if (u == null || u.orderId() == null) {
+            return Optional.empty();
+        }
+        Optional<ShipmentOrder> found = shipmentOrderRepository.findFirstByPartnerOrderId(u.orderId());
+        if (found.isEmpty()) {
+            LOG.info("Ahamove webhook: không có đơn CPN cho {}", u.orderId());
+            return Optional.empty();
+        }
+        String code = found.get().getOrderCode();
+        tx.executeWithoutResult(status -> savePartnerInfo(code, u));
+
+        ShipmentOrder order = requireOrder(code);
+        savePickupPhotos(order, u);
+        if (isDoorPickup(order)) {
+            applyDoorPickup(code, u);
+            return Optional.of(code);
+        }
+        startDeliveryIfPickedUp(order);
+        if (order.getStatus() != OrderStatus.OUT_FOR_DELIVERY) {
+            if (order.getStatus() == OrderStatus.DELIVERED && !u.podUrls().isEmpty()) {
+                try {
+                    deliveryFacadeService.appendPodPhotos(order, u.podUrls(), CAPTION_DROP);
+                } catch (RuntimeException e) {
+                    LOG.warn("Ahamove webhook {}: không lưu ảnh giao đơn {} — {}", u.orderId(), code, e.getMessage());
+                }
+            }
+            return Optional.of(code);
+        }
+        try {
+            if ("COMPLETED".equals(u.dropStatus())) {
+                if (!u.podUrls().isEmpty()) {
+                    PodRequest pod = new PodRequest();
+                    pod.setChannel("HOME");
+                    String name = notBlank(order.getReceiverName()) ? order.getReceiverName().trim() : "Người nhận";
+                    pod.setActualRecipientName(name.length() > 100 ? name.substring(0, 100) : name);
+                    pod.setPhotos(u.podUrls());
+                    pod.setCaption(CAPTION_DROP);
+                    pod.setCollectedAmount(BigDecimal.ZERO);
+                    deliveryFacadeService.pod(code, pod);
+                }
+            } else if ("FAILED".equals(u.dropStatus())) {
+                FailDeliveryRequest fail = new FailDeliveryRequest();
+                String reason = "Ahamove: " + (notBlank(u.failReason()) ? viFailReason(u.failReason()) : "giao thất bại");
+                fail.setReason(reason.length() > 255 ? reason.substring(0, 255) : reason);
+                deliveryFacadeService.failDelivery(code, fail);
+            } else if ("CANCELLED".equals(u.status())) {
+                String reason = notBlank(u.failReason()) ? u.failReason() : "Ahamove hủy đơn";
+                tx.executeWithoutResult(status -> markCancelled(code, reason, "ahamove"));
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Ahamove webhook {}: không tự chuyển trạng thái đơn {} — {}", u.orderId(), code, e.getMessage());
+        }
+        return Optional.of(code);
+    }
+
+    record WebhookUpdate(
+        String orderId,
+        String status,
+        String subStatus,
+        String dropStatus,
+        String driverName,
+        String driverPhone,
+        String sharedLink,
+        BigDecimal totalPay,
+        List<String> podUrls,
+        String failReason,
+        List<String> pickupPodUrls,
+        String paymentMethod
+    ) {}
+
+    static WebhookUpdate parseWebhook(JsonNode body) {
+        if (body == null || !body.isObject()) {
+            return null;
+        }
+        String id = text(body, "_id");
+        if (id == null) {
+            id = text(body, "order_id");
+        }
+        id = stripStopSuffix(id);
+        JsonNode drop = null;
+        JsonNode path = body.get("path");
+        List<String> pickupPods = new ArrayList<>();
+        if (path != null && path.isArray() && path.size() > 1) {
+            JsonNode pickup = path.get(0);
+            if (pickup != null) {
+                collectUrls(pickup.get("pop_info"), pickupPods);
+                collectUrls(pickup.get("por_info"), pickupPods);
+                if (path.size() > 1) {
+                    collectUrls(pickup.get("pod_info"), pickupPods);
+                }
+            }
+            drop = path.size() > 1 ? path.get(path.size() - 1) : path.get(0);
+        }
+        List<String> pods = new ArrayList<>();
+        if (drop != null) {
+            collectUrls(drop.get("pod_info"), pods);
+        }
+        String fail = drop != null ? text(drop, "fail_comment") : null;
+        if (fail == null) {
+            fail = text(body, "cancel_comment");
+        }
+        if (fail == null) {
+            fail = text(body, "comment");
+        }
+        return new WebhookUpdate(
+            id,
+            upper(text(body, "status")),
+            text(body, "sub_status"),
+            drop != null ? upper(text(drop, "status")) : null,
+            text(body, "supplier_name"),
+            text(body, "supplier_id"),
+            text(body, "shared_link"),
+            AhamoveOrderClient.billableFee(number(body, "total_price"), number(body, "total_pay")),
+            pods,
+            fail,
+            pickupPods,
+            payMethod(text(body, "payment_method"))
+        );
+    }
+
+    /**
+     * Kéo ảnh nhận/giao từ đơn Ahamove đang có (đơn đã callback trước khi CPN đọc {@code por_info}).
+     * Không đổi trạng thái đơn.
+     */
+    public void pullPhotos(String orderCode) {
+        if (orderCode == null || orderCode.isBlank()) {
+            return;
+        }
+        ShipmentOrder order;
+        try {
+            order = requireOrder(orderCode.trim());
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (!PARTNER_CODE.equals(order.getPartnerCode()) || !notBlank(order.getPartnerOrderId())) {
+            return;
+        }
+        try {
+            JsonNode body = ahamoveOrderClient.fetchOrder(order.getPartnerOrderId());
+            body = unwrapOrder(body);
+            WebhookUpdate u = parseWebhook(body);
+            if (u == null) {
+                return;
+            }
+            savePickupPhotos(order, u);
+            if (!u.podUrls().isEmpty()) {
+                deliveryFacadeService.appendPodPhotos(order, u.podUrls(), CAPTION_DROP);
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Ahamove pull photos {}: {}", orderCode, e.getMessage());
+        }
+    }
+
+    /** GET /orders có thể bọc payload trong {@code order} hoặc {@code data}. */
+    static JsonNode unwrapOrder(JsonNode body) {
+        if (body == null || !body.isObject() || body.has("path")) {
+            return body;
+        }
+        JsonNode order = body.get("order");
+        if (order != null && order.isObject()) {
+            return order;
+        }
+        JsonNode data = body.get("data");
+        if (data != null && data.isObject()) {
+            return data;
+        }
+        return body;
+    }
+
+    /** Ảnh tài xế đến lấy hàng — lưu vào POD, không đổi trạng thái đơn. */
+    private void savePickupPhotos(ShipmentOrder order, WebhookUpdate u) {
+        if (u.pickupPodUrls().isEmpty()) {
+            return;
+        }
+        try {
+            int added = deliveryFacadeService.appendPodPhotos(order, u.pickupPodUrls(), CAPTION_PICKUP);
+            if (added > 0) {
+                orderFacadeService.recordEvent(order, "AHAMOVE_PICKUP_POD", "Ảnh tài xế nhận hàng (" + added + ")", "ahamove");
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Ahamove webhook {}: không lưu ảnh nhận hàng đơn {} — {}", u.orderId(), order.getOrderCode(), e.getMessage());
+        }
+    }
+
+    /** Ahamove gửi sự kiện theo điểm dừng dạng {@code ORDERID-1}; mã đơn gốc không có hậu tố. */
+    static String stripStopSuffix(String id) {
+        if (id == null) {
+            return null;
+        }
+        String s = id.trim();
+        int dash = s.lastIndexOf('-');
+        if (dash > 0 && dash < s.length() - 1 && s.substring(dash + 1).matches("\\d{1,2}")) {
+            return s.substring(0, dash);
+        }
+        return s.isEmpty() ? null : s;
+    }
+
+    private static void collectUrls(JsonNode node, List<String> out) {
+        if (node == null || node.isNull() || out.size() >= 3) {
+            return;
+        }
+        if (node.isTextual()) {
+            String s = node.asText().trim();
+            if (s.startsWith("http://") || s.startsWith("https://")) {
+                if (!out.contains(s)) {
+                    out.add(s.length() > 1000 ? s.substring(0, 1000) : s);
+                }
+            }
+            return;
+        }
+        if (node.isArray() || node.isObject()) {
+            for (JsonNode child : node) {
+                collectUrls(child, out);
+            }
+        }
+    }
+
+    private static AhamoveCargo cargoOf(ShipmentOrder order, DispatchRequest req) {
+        AhamoveCargo cargo = AhamoveCargo.from(order);
+        if (req.getBulkyTier() != null) {
+            cargo = cargo.withTierChoice(req.getBulkyTier());
+        }
+        if (req.getTipUnits() != null) {
+            cargo = cargo.withTip(req.getTipUnits());
+        }
+        return cargo;
+    }
+
+    private static String tipNote(DispatchRequest req) {
+        int n = req == null || req.getTipUnits() == null ? 0 : req.getTipUnits();
+        if (n <= 0) {
+            return "";
+        }
+        return " · tip " + (n * AhamoveCargo.TIP_UNIT_VND) + "đ";
+    }
+
+    record Dispatchable(Office office, BigDecimal advance) {}
+
+    private Dispatchable assertDispatchable(ShipmentOrder order) {
+        dayClosureGuard.assertOrderMutable(order);
+        if (order.getStatus() != OrderStatus.AT_DEST && order.getStatus() != OrderStatus.FAILED_DELIVERY) {
+            throw new BadRequestAlertException("Chỉ gọi Ahamove khi hàng ở kho VP nhận / giao thất bại", ENTITY, "ahamoveStatus");
+        }
+        if (!Boolean.TRUE.equals(order.getHomeDelivery())) {
+            throw new BadRequestAlertException("Đơn không phải giao tận nơi", ENTITY, "ahamoveNotHomeDelivery");
+        }
+        if (OrderMoney.nz(order.getCodAmount()).signum() > 0) {
+            throw new BadRequestAlertException("Đơn có COD — chưa hỗ trợ giao COD qua Ahamove", ENTITY, "ahamoveCod");
+        }
+        PartnerAdvance.assertNoRefundDue(order, ENTITY);
+        BigDecimal advance = advanceFor(order);
+        if (advance.signum() > 0) {
+            dayClosureGuard.assertCollectionMutable(order);
+        }
+        Office office = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+        if (office == null || office.getLatitude() == null || office.getLongitude() == null) {
+            throw new BadRequestAlertException("VP nhận chưa có toạ độ GPS (Danh mục VP)", ENTITY, "ahamoveOfficeGps");
+        }
+        return new Dispatchable(office, advance);
+    }
+
+    /**
+     * Số tài xế ứng = toàn bộ cước còn nợ, cả đơn người gửi trả (vd. người nhận xin giao tận nơi sau khi hàng tới).
+     * Đơn ghi nợ cước thì chặn.
+     */
+    static BigDecimal advanceFor(ShipmentOrder order) {
+        BigDecimal due = OrderMoney.due(order);
+        if (due.signum() == 0) {
+            return BigDecimal.ZERO;
+        }
+        if (Boolean.TRUE.equals(order.getOnCredit())) {
+            throw new BadRequestAlertException("Đơn ghi nợ cước — không gọi Ahamove ứng cước", ENTITY, "ahamoveOnCredit");
+        }
+        return due.setScale(0, RoundingMode.HALF_UP);
+    }
+
+    /** Người bấm bàn giao Ahamove gần nhất — nhận nợ tiền tài xế ứng để nộp về công ty. */
+    String dispatcherOf(ShipmentOrder order) {
+        String who = null;
+        for (OrderDeliveryAttempt a : deliveryAttemptRepository.findByOrder_IdOrderByAttemptAtAsc(order.getId())) {
+            if (
+                a.getDeliveryPartner() == DeliveryPartner.AHAMOVE &&
+                "ASSIGN_PARTNER".equals(a.getReason()) &&
+                notBlank(a.getHandledByUsername())
+            ) {
+                who = a.getHandledByUsername();
+            }
+        }
+        return who != null ? who : currentActor();
+    }
+
+    /**
+     * Đơn đã quét bàn giao ship nhưng khoản thu ứng chưa ghi (lỗi giữa chừng).
+     * Không ghi khi mới book hoặc mới có tài xế — lúc đó đơn vẫn chưa thu.
+     */
+    @Scheduled(fixedDelay = 300_000, initialDelay = 45_000)
+    public void catchUpUncollectedAdvances() {
+        for (ShipmentOrder order : shipmentOrderRepository.findAhamoveAdvanceUncollected()) {
+            if (order.getPartnerShipConfirmedAt() == null) {
+                continue;
+            }
+            String code = order.getOrderCode();
+            try {
+                confirmAdvance(code);
+                LOG.info("Ahamove advance catch-up recorded debt for {}", code);
+            } catch (RuntimeException e) {
+                LOG.warn("Ahamove advance catch-up {} skipped: {}", code, e.getMessage());
+            }
+        }
+    }
+
+    public OrderDetailDTO confirmAdvance(String orderCode) {
+        tx.executeWithoutResult(status -> {
+            ShipmentOrder order = requireOrder(orderCode);
+            BigDecimal amount = PartnerAdvance.amount(order);
+            if (!courierPartner(order.getPartnerCode()) || amount.signum() <= 0) {
+                throw new BadRequestAlertException("Đơn không có tiền tài xế Ahamove ứng", ENTITY, "ahamoveNoAdvance");
+            }
+            if (order.getPartnerCodCollectedAt() != null) {
+                throw new BadRequestAlertException("Đã xác nhận nhận tiền ứng trước đó", ENTITY, "ahamoveAdvanceDone");
+            }
+            OrderStatus st = order.getStatus();
+            if (st != OrderStatus.OUT_FOR_DELIVERY && st != OrderStatus.DELIVERED && st != OrderStatus.FAILED_DELIVERY) {
+                throw new BadRequestAlertException("Trạng thái đơn không nhận tiền ứng được", ENTITY, "ahamoveAdvanceStatus");
+            }
+            String driver = notBlank(order.getPartnerDriverName()) ? " · tài xế " + order.getPartnerDriverName().trim() : "";
+            String note = truncate(PartnerAdvance.PAYMENT_NOTE_PREFIX + driver, 255);
+            String debtor = dispatcherOf(order);
+            deliveryFacadeService.recordPartnerAdvance(order, amount, note, debtor);
+            orderFacadeService.recordEvent(
+                order,
+                "AHAMOVE_ADVANCE_IN",
+                "Nhận " + PartnerAdvance.money(amount) + "đ tài xế Ahamove ứng" + driver + " · người nhận nợ " + debtor,
+                currentActor()
+            );
+        });
+        return orderFacadeService.getByCode(orderCode);
+    }
+
+    /**
+     * Trả lại tiền ứng cho tài xế khi giao không được (hàng đã về VP). Xoá khoản thu ứng → đơn quay lại còn nợ.
+     * Không cho nếu tiền đã vào phiếu thu nộp quỹ hoặc ngày ghi thu đã chốt.
+     */
+    public OrderDetailDTO refundAdvance(String orderCode) {
+        tx.executeWithoutResult(status -> {
+            ShipmentOrder order = requireOrder(orderCode);
+            if (!PartnerAdvance.needsRefund(order)) {
+                throw new BadRequestAlertException("Đơn không có tiền ứng cần hoàn", ENTITY, "ahamoveNoRefund");
+            }
+            dayClosureGuard.assertCollectionMutable(order);
+            OrderPayment payment = orderPaymentRepository
+                .findByOrder_IdOrderByPaymentAtDesc(order.getId())
+                .stream()
+                .filter(p -> p.getNote() != null && p.getNote().startsWith(PartnerAdvance.PAYMENT_NOTE_PREFIX))
+                .findFirst()
+                .orElseThrow(() -> new BadRequestAlertException("Không tìm thấy khoản thu tiền ứng", ENTITY, "ahamoveAdvanceMissing"));
+            Instant paidAt = payment.getPaymentAt() != null ? payment.getPaymentAt() : order.getPartnerCodCollectedAt();
+            if (receiptOrderLineRepository.existsByOrder_IdAndReceipt_CreatedAtGreaterThanEqual(order.getId(), paidAt)) {
+                throw new BadRequestAlertException(
+                    "Tiền ứng đã nằm trong phiếu thu nộp quỹ — hủy phiếu thu trước khi hoàn ứng",
+                    ENTITY,
+                    "ahamoveAdvanceInReceipt"
+                );
+            }
+            Office receiving = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+            dayClosureGuard.assertOfficeOpen(receiving, LocalDate.ofInstant(paidAt, DayClosureGuard.VN));
+
+            BigDecimal amount = OrderMoney.nz(payment.getAmount());
+            orderPaymentRepository.delete(payment);
+            order.setPaidAmount(OrderMoney.nz(order.getPaidAmount()).subtract(amount).max(BigDecimal.ZERO));
+            order.setPartnerCodAmount(null);
+            order.setPartnerCodCollectedAt(null);
+            order.setPartnerCodCollectedBy(null);
+            shipmentOrderRepository.save(order);
+            orderFacadeService.recordEvent(
+                order,
+                "AHAMOVE_ADVANCE_REFUND",
+                "Hoàn " +
+                PartnerAdvance.money(amount) +
+                "đ tiền ứng cho tài xế Ahamove (thu ngày " +
+                LocalDate.ofInstant(paidAt, DayClosureGuard.VN) +
+                ")",
+                currentActor()
+            );
+        });
+        return orderFacadeService.getByCode(orderCode);
+    }
+
+    /**
+     * App quét đủ kiện rồi xác nhận giao ship. Lưu ảnh điều phối, chuyển nợ sang người bấm.
+     * Không đổi trạng thái đơn — giao thành công chỉ khi Ahamove báo về.
+     */
+    public OrderDetailDTO confirmShipHandover(String orderCode, ShipHandoverRequest request) {
+        ShipHandoverRequest req = request != null ? request : new ShipHandoverRequest();
+        String actor = currentActor();
+        tx.executeWithoutResult(status -> {
+            ShipmentOrder order = requireOrder(orderCode);
+            if (
+                order.getStatus() != OrderStatus.AT_DEST &&
+                order.getStatus() != OrderStatus.FAILED_DELIVERY &&
+                order.getStatus() != OrderStatus.OUT_FOR_DELIVERY
+            ) {
+                throw new BadRequestAlertException(
+                    "Chỉ xác nhận giao ship khi hàng ở kho giao hoặc đang giao",
+                    ENTITY,
+                    "ahamoveHandoverStatus"
+                );
+            }
+            assertAhamoveOrder(order);
+            assertAllPackages(order, req.getPackageSeqs());
+            if (req.getPhotos() == null || req.getPhotos().stream().noneMatch(AhamoveDispatchService::notBlank)) {
+                throw new BadRequestAlertException("Cần ảnh điều phối giao ship", ENTITY, "ahamoveHandoverPhoto");
+            }
+            deliveryFacadeService.appendPodPhotos(order, req.getPhotos(), CAPTION_OFFICE);
+            applyShipDebtClaim(order, actor);
+        });
+        return orderFacadeService.getByCode(orderCode);
+    }
+
+    /**
+     * Người giao tự bấm trên đúng đơn (đang giao / giao thành công / giao thất bại). Ai bấm người đó chịu nợ.
+     * Không đổi trạng thái đơn.
+     */
+    public OrderDetailDTO claimShipDebt(String orderCode) {
+        String actor = currentActor();
+        tx.executeWithoutResult(status -> applyShipDebtClaim(requireOrder(orderCode), actor));
+        return orderFacadeService.getByCode(orderCode);
+    }
+
+    /** Chuyển nợ ứng (dương) và phí trả ship (âm) sang {@code actor}. Không đổi trạng thái. */
+    void applyShipDebtClaim(ShipmentOrder order, String actor) {
+        assertAhamoveOrder(order);
+        OrderStatus st = order.getStatus();
+        if (
+            st != OrderStatus.AT_DEST &&
+            st != OrderStatus.OUT_FOR_DELIVERY &&
+            st != OrderStatus.DELIVERED &&
+            st != OrderStatus.FAILED_DELIVERY
+        ) {
+            throw new BadRequestAlertException(
+                "Chỉ xác nhận nợ ở đơn kho giao, đang giao, giao thành công hoặc giao thất bại",
+                ENTITY,
+                "ahamoveClaimStatus"
+            );
+        }
+        String who = truncate(actor, 50);
+        if (who != null && who.equalsIgnoreCase(order.getPartnerShipConfirmedBy())) {
+            return;
+        }
+        dayClosureGuard.assertCollectionMutable(order);
+        boolean firstCollect = order.getPartnerCodCollectedAt() == null && PartnerAdvance.amount(order).signum() > 0;
+        reassignAdvance(order, who);
+        reassignFees(order, who);
+        order.setPartnerShipConfirmedBy(who);
+        order.setPartnerShipConfirmedAt(Instant.now());
+        shipmentOrderRepository.save(order);
+        String detail = firstCollect
+            ? "Đã thanh toán nhận ứng " + PartnerAdvance.money(PartnerAdvance.amount(order)) + "đ · nợ " + who
+            : "Xác nhận giao ship · nợ chuyển sang " + who;
+        orderFacadeService.recordEvent(order, "AHAMOVE_SHIP_CONFIRM", detail, who);
+    }
+
+    static void assertAllPackages(ShipmentOrder order, List<Integer> seqs) {
+        int qty = order.getQuantity() == null || order.getQuantity() < 1 ? 1 : order.getQuantity();
+        Set<Integer> got = new HashSet<>();
+        if (seqs != null) {
+            for (Integer seq : seqs) {
+                if (seq != null) {
+                    got.add(seq);
+                }
+            }
+        }
+        for (int i = 1; i <= qty; i++) {
+            if (!got.contains(i)) {
+                throw new BadRequestAlertException(
+                    "Chưa quét đủ kiện của " + order.getOrderCode() + " (" + got.size() + "/" + qty + ")",
+                    ENTITY,
+                    "ahamovePackagesIncomplete"
+                );
+            }
+        }
+    }
+
+    private static void assertAhamoveOrder(ShipmentOrder order) {
+        if (!courierPartner(order.getPartnerCode()) || !notBlank(order.getPartnerOrderId())) {
+            throw new BadRequestAlertException("Đơn không giao qua đối tác", ENTITY, "ahamoveNotDispatched");
+        }
+    }
+
+    private void reassignAdvance(ShipmentOrder order, String actor) {
+        BigDecimal amount = PartnerAdvance.amount(order);
+        if (amount.signum() <= 0) {
+            return;
+        }
+        if (order.getPartnerCodCollectedAt() == null) {
+            String note = truncate(PartnerAdvance.PAYMENT_NOTE_PREFIX, 255);
+            deliveryFacadeService.recordPartnerAdvance(order, amount, note, actor);
+            return;
+        }
+        OrderPayment payment = orderPaymentRepository
+            .findByOrder_IdOrderByPaymentAtDesc(order.getId())
+            .stream()
+            .filter(p -> p.getNote() != null && p.getNote().startsWith(PartnerAdvance.PAYMENT_NOTE_PREFIX))
+            .findFirst()
+            .orElseThrow(() -> new BadRequestAlertException("Không tìm thấy khoản thu tiền ứng", ENTITY, "ahamoveAdvanceMissing"));
+        if (actor.equalsIgnoreCase(payment.getCollectorUsername())) {
+            order.setPartnerCodCollectedBy(actor);
+            return;
+        }
+        Instant paidAt = payment.getPaymentAt() != null ? payment.getPaymentAt() : order.getPartnerCodCollectedAt();
+        if (receiptOrderLineRepository.existsByOrder_IdAndReceipt_CreatedAtGreaterThanEqual(order.getId(), paidAt)) {
+            throw new BadRequestAlertException(
+                "Tiền ứng đã nằm trong phiếu thu — hủy phiếu trước khi chuyển nợ",
+                ENTITY,
+                "ahamoveAdvanceInReceipt"
+            );
+        }
+        Office receiving = order.getFinalToOffice() != null ? order.getFinalToOffice() : order.getToOffice();
+        dayClosureGuard.assertOfficeOpen(receiving, LocalDate.ofInstant(paidAt, DayClosureGuard.VN));
+        payment.setCollectorUsername(actor);
+        orderPaymentRepository.save(payment);
+        order.setPartnerCodCollectedBy(actor);
+    }
+
+    private void reassignFees(ShipmentOrder order, String actor) {
+        for (PartnerFeeExpense fee : partnerFeeExpenseRepository.findByOrder_Id(order.getId())) {
+            if (fee.getReceipt() != null) {
+                if (fee.getPayerUsername() != null && !fee.getPayerUsername().equalsIgnoreCase(actor)) {
+                    throw new BadRequestAlertException(
+                        "Phí Ahamove đã nằm trong phiếu thu — hủy phiếu trước khi chuyển nợ",
+                        ENTITY,
+                        "ahamoveFeeInReceipt"
+                    );
+                }
+                continue;
+            }
+            fee.setPayerUsername(actor);
+            partnerFeeExpenseRepository.save(fee);
+        }
+    }
+
+    private void saveDispatched(
+        String code,
+        AhamoveOrderClient.CreatedOrder created,
+        DispatchRequest req,
+        BigDecimal advanceSent,
+        String actor,
+        String paymentMethod
+    ) {
+        ShipmentOrder order = requireOrder(code);
+        BigDecimal advance = assertDispatchable(order).advance();
+        if (advance.compareTo(advanceSent) != 0) {
+            throw new BadRequestAlertException(
+                "Cước còn nợ vừa thay đổi (" + PartnerAdvance.money(advance) + "đ) — gọi lại Ahamove",
+                ENTITY,
+                "ahamoveAdvanceChanged"
+            );
+        }
+        Instant now = Instant.now();
+        order.setPartnerCodAmount(advance.signum() > 0 ? advance : null);
+        order.setPartnerCodCollectedAt(null);
+        order.setPartnerCodCollectedBy(null);
+        order.setPartnerCode(PARTNER_CODE);
+        order.setPartnerOrderId(created.orderId());
+        order.setPartnerStatus(created.status());
+        order.setPartnerSubStatus(null);
+        order.setPartnerTrackingUrl(truncate(created.sharedLink(), 500));
+        order.setPartnerFeeAmount(created.totalPay());
+        order.setPartnerPayMethod(payMethod(paymentMethod));
+        order.setPartnerDriverName(null);
+        order.setPartnerDriverPhone(null);
+        order.setPartnerPodUrl(null);
+        order.setPartnerFailReason(null);
+        order.setPartnerUpdatedAt(now);
+        order.setShipper(null);
+        // delivery_lat/lng chỉ lưu từ link Google Maps lúc tạo/sửa đơn — không ghi đè bằng ghim OSM khi book Ahamove.
+        boolean pinned = req.getLat() != null && req.getLng() != null;
+        shipmentOrderRepository.save(order);
+
+        OrderDeliveryAttempt attempt = new OrderDeliveryAttempt();
+        attempt.setAttemptNo((int) deliveryAttemptRepository.countByOrder_Id(order.getId()) + 1);
+        attempt.setAttemptAt(now);
+        attempt.setResult(DeliveryAttemptResult.SUCCESS);
+        attempt.setHandledByUsername(actor);
+        attempt.setDeliveryPartner(DeliveryPartner.AHAMOVE);
+        attempt.setReason("ASSIGN_PARTNER");
+        attempt.setOrder(order);
+        deliveryAttemptRepository.save(attempt);
+
+        // Chưa thu tiền ứng lúc book. Đơn vẫn "chưa thu" cho tới khi điều phối quét bàn giao ship trên app.
+        orderFacadeService.recordEvent(
+            order,
+            "AHAMOVE_BOOK",
+            "Book Ahamove " +
+            created.orderId() +
+            " · " +
+            viStatus(created.status() != null ? created.status() : "ASSIGNING") +
+            " · chờ tài xế lấy hàng" +
+            (created.totalPay() != null ? " · phí " + created.totalPay() + " (" + payMethodLabel(paymentMethod) + ")" : "") +
+            tipNote(req) +
+            (advance.signum() > 0 ? " · sẽ ứng " + PartnerAdvance.money(advance) + " khi bàn giao ship" : "") +
+            (pinned ? "" : " · không ghim GPS, Ahamove tự dò địa chỉ"),
+            actor
+        );
+    }
+
+    /** Lấy tận nơi: hàng chưa nhập kho gửi, không phải đơn đang giao ở VP nhận. */
+    static boolean isDoorPickup(ShipmentOrder order) {
+        if (order == null || !Boolean.TRUE.equals(order.getHomePickup()) || order.getPickedUpAt() != null) {
+            return false;
+        }
+        OrderStatus st = order.getStatus();
+        return st == OrderStatus.CONFIRMED || st == OrderStatus.WAITING;
+    }
+
+    private Office assertPickupDispatchable(ShipmentOrder order) {
+        dayClosureGuard.assertOrderMutable(order);
+        if (!isDoorPickup(order)) {
+            throw new BadRequestAlertException("Chỉ gọi Ahamove lấy hàng khi đơn đang chờ lấy", ENTITY, "ahamovePickupStatus");
+        }
+        if (order.getPaymentTerm() != PaymentTerm.NHAN_TRA) {
+            throw new BadRequestAlertException("Đơn lấy tận nơi chỉ chọn người nhận thanh toán", ENTITY, "pickupReceiverPays");
+        }
+        if (partnerActive(order)) {
+            throw new BadRequestAlertException("Đơn đang có chuyến Ahamove — hủy chuyến cũ trước", ENTITY, "ahamoveActive");
+        }
+        Office office = order.getFromOffice();
+        if (office == null || office.getLatitude() == null || office.getLongitude() == null) {
+            throw new BadRequestAlertException("VP gửi chưa có toạ độ GPS (Danh mục VP)", ENTITY, "ahamoveOfficeGps");
+        }
+        return office;
+    }
+
+    /**
+     * Đang vận chuyển (tài xế đã lấy) → tab Đang lấy. Giao xong tại VP gửi → nhập kho.
+     * Callback không về thì admin nhập kho bù. Ảnh điểm lấy và điểm giao đều lưu.
+     */
+    private void applyDoorPickup(String code, WebhookUpdate u) {
+        if (!u.podUrls().isEmpty()) {
+            try {
+                deliveryFacadeService.appendPodPhotos(requireOrder(code), u.podUrls(), CAPTION_DROP);
+            } catch (RuntimeException e) {
+                LOG.warn("Ahamove lấy {}: không lưu ảnh giao về VP — {}", code, e.getMessage());
+            }
+        }
+        String partnerStatus = u.dropStatus() != null ? u.dropStatus() : u.status();
+        if ("COMPLETED".equals(partnerStatus)) {
+            try {
+                orderFacadeService.warehouseReceive(code);
+            } catch (RuntimeException e) {
+                LOG.warn("Ahamove lấy {}: chưa nhập kho — {}", code, e.getMessage());
+            }
+            return;
+        }
+        if ("FAILED".equals(partnerStatus) || "CANCELLED".equals(partnerStatus)) {
+            tx.executeWithoutResult(status -> {
+                ShipmentOrder order = requireOrder(code);
+                order.setPickingAt(null);
+                shipmentOrderRepository.save(order);
+            });
+            return;
+        }
+        if (partnerStatus != null && PARTNER_PICKED_UP.contains(partnerStatus.trim().toUpperCase())) {
+            try {
+                orderFacadeService.pickupStart(code);
+            } catch (RuntimeException e) {
+                LOG.warn("Ahamove lấy {}: chưa chuyển đang lấy — {}", code, e.getMessage());
+            }
+        }
+    }
+
+    private void savePickupDispatched(
+        String code,
+        AhamoveOrderClient.CreatedOrder created,
+        DispatchRequest req,
+        String actor,
+        String paymentMethod
+    ) {
+        ShipmentOrder order = requireOrder(code);
+        assertPickupDispatchable(order);
+        Instant now = Instant.now();
+        order.setPartnerCode(PARTNER_CODE);
+        order.setPartnerOrderId(created.orderId());
+        order.setPartnerStatus(created.status());
+        order.setPartnerSubStatus(null);
+        order.setPartnerTrackingUrl(truncate(created.sharedLink(), 500));
+        order.setPartnerFeeAmount(created.totalPay());
+        order.setPartnerPayMethod(payMethod(paymentMethod));
+        order.setPartnerDriverName(null);
+        order.setPartnerDriverPhone(null);
+        order.setPartnerPodUrl(null);
+        order.setPartnerFailReason(null);
+        order.setPartnerUpdatedAt(now);
+        order.setShipper(null);
+        shipmentOrderRepository.save(order);
+
+        OrderDeliveryAttempt attempt = new OrderDeliveryAttempt();
+        attempt.setAttemptNo((int) deliveryAttemptRepository.countByOrder_Id(order.getId()) + 1);
+        attempt.setAttemptAt(now);
+        attempt.setResult(DeliveryAttemptResult.SUCCESS);
+        attempt.setHandledByUsername(actor);
+        attempt.setDeliveryPartner(DeliveryPartner.AHAMOVE);
+        attempt.setReason("ASSIGN_PARTNER");
+        attempt.setOrder(order);
+        deliveryAttemptRepository.save(attempt);
+
+        orderFacadeService.recordEvent(
+            order,
+            "AHAMOVE_BOOK",
+            "Book Ahamove lấy tận nơi " +
+            created.orderId() +
+            " · " +
+            viStatus(created.status() != null ? created.status() : "ASSIGNING") +
+            " · chờ tài xế đến lấy" +
+            (created.totalPay() != null ? " · phí " + created.totalPay() + " (" + payMethodLabel(paymentMethod) + ")" : "") +
+            tipNote(req) +
+            (req.getLat() != null ? "" : " · không ghim GPS, Ahamove tự dò địa chỉ"),
+            actor
+        );
+    }
+
+    /** Tài xế đã bấm lấy hàng (IN PROCESS / giao xong / thất bại) thì đơn mới sang Đang giao. */
+    private void startDeliveryIfPickedUp(ShipmentOrder order) {
+        OrderStatus st = order.getStatus();
+        if (st != OrderStatus.AT_DEST && st != OrderStatus.FAILED_DELIVERY) {
+            return;
+        }
+        String partnerStatus = order.getPartnerStatus();
+        if (partnerStatus == null || !PARTNER_PICKED_UP.contains(partnerStatus.trim().toUpperCase())) {
+            return;
+        }
+        try {
+            OrderTransitionRequest tr = new OrderTransitionRequest();
+            tr.setToStatus(OrderStatus.OUT_FOR_DELIVERY);
+            tr.setAction("AHAMOVE_PICKUP");
+            tr.setDetail("Tài xế Ahamove đã lấy hàng · " + partnerStatus);
+            orderFacadeService.transition(order.getOrderCode(), tr);
+            order.setStatus(OrderStatus.OUT_FOR_DELIVERY);
+        } catch (RuntimeException e) {
+            LOG.warn("Ahamove {}: chưa chuyển {} sang đang giao — {}", order.getPartnerOrderId(), order.getOrderCode(), e.getMessage());
+        }
+    }
+
+    private void markCancelled(String code, String reason, String actor) {
+        ShipmentOrder order = requireOrder(code);
+        order.setPartnerStatus("CANCELLED");
+        order.setPartnerSubStatus(null);
+        order.setPartnerFailReason(truncate(reason, 500));
+        order.setPartnerUpdatedAt(Instant.now());
+        shipmentOrderRepository.save(order);
+        if (order.getStatus() != OrderStatus.OUT_FOR_DELIVERY) {
+            return;
+        }
+        OrderDeliveryAttempt attempt = new OrderDeliveryAttempt();
+        attempt.setAttemptNo((int) deliveryAttemptRepository.countByOrder_Id(order.getId()) + 1);
+        attempt.setAttemptAt(Instant.now());
+        attempt.setResult(DeliveryAttemptResult.FAILED);
+        attempt.setHandledByUsername(actor);
+        attempt.setDeliveryPartner(DeliveryPartner.AHAMOVE);
+        attempt.setReason(truncate("AHAMOVE_CANCEL: " + reason, 255));
+        attempt.setOrder(order);
+        deliveryAttemptRepository.save(attempt);
+
+        OrderTransitionRequest tr = new OrderTransitionRequest();
+        tr.setToStatus(OrderStatus.FAILED_DELIVERY);
+        tr.setAction("AHAMOVE_CANCEL");
+        tr.setDetail(truncate(reason, 255));
+        orderFacadeService.transition(code, tr);
+    }
+
+    private void savePartnerInfo(String code, WebhookUpdate u) {
+        ShipmentOrder order = requireOrder(code);
+        String before = order.getPartnerStatus();
+        String beforeSub = order.getPartnerSubStatus();
+        String newStatus = u.dropStatus() != null && ("COMPLETED".equals(u.dropStatus()) || "FAILED".equals(u.dropStatus()))
+            ? u.dropStatus()
+            : u.status();
+        String sub = upper(u.subStatus());
+        if (sub != null && sub.isBlank()) {
+            sub = null;
+        }
+        String shownStatus = newStatus != null ? newStatus : before;
+        if ("CANCELLED".equals(shownStatus)) {
+            sub = null;
+        } else if (isPickedUpStatus(shownStatus) && ("BOARDED".equals(sub) || "ARRIVED".equals(sub))) {
+            sub = null;
+        }
+        if (newStatus != null) {
+            order.setPartnerStatus(truncate(newStatus, 40));
+        }
+        order.setPartnerSubStatus(truncate(sub, 40));
+        if (notBlank(u.driverName())) {
+            order.setPartnerDriverName(truncate(u.driverName(), 100));
+        }
+        if (notBlank(u.driverPhone())) {
+            order.setPartnerDriverPhone(truncate(u.driverPhone(), 32));
+        }
+        if (notBlank(u.sharedLink())) {
+            order.setPartnerTrackingUrl(truncate(u.sharedLink(), 500));
+        }
+        if (u.totalPay() != null && u.totalPay().signum() > 0) {
+            order.setPartnerFeeAmount(u.totalPay());
+        }
+        if (u.paymentMethod() != null) {
+            order.setPartnerPayMethod(u.paymentMethod());
+        }
+        if (!u.podUrls().isEmpty()) {
+            order.setPartnerPodUrl(truncate(u.podUrls().get(0), 1000));
+        }
+        if (notBlank(u.failReason())) {
+            order.setPartnerFailReason(truncate(viFailReason(u.failReason()), 500));
+        }
+        order.setPartnerUpdatedAt(Instant.now());
+        shipmentOrderRepository.save(order);
+
+        boolean statusChanged = newStatus != null && !newStatus.equals(before);
+        boolean subChanged = sub != null ? !sub.equals(beforeSub) : beforeSub != null;
+        if (statusChanged || subChanged) {
+            String label = viStatus(newStatus != null ? newStatus : before);
+            String subLabel = viStatus(sub);
+            String detail =
+                "Ahamove " +
+                label +
+                (subLabel.isEmpty() ? "" : " · " + subLabel) +
+                (notBlank(u.driverName()) ? " · tài xế " + u.driverName() : "") +
+                (notBlank(u.driverPhone()) ? " " + u.driverPhone() : "") +
+                (notBlank(u.failReason()) ? " · " + viFailReason(u.failReason()) : "");
+            orderFacadeService.recordEvent(order, "AHAMOVE_STATUS", detail, "ahamove");
+        }
+        recordCashFeeIfPickedUp(order, newStatus);
+    }
+
+    /**
+     * Thanh toán Ahamove tiền mặt: tài xế lấy hàng thì người bàn giao trả phí (báo giá lúc tạo đơn) — ghi 1 khoản/đơn Ahamove,
+     * trừ vào phiếu thu tiếp theo của người đó.
+     */
+    public void recordCashFeeIfPickedUp(ShipmentOrder order, String partnerStatus) {
+        String partnerOrderId = order.getPartnerOrderId();
+        BigDecimal fee = OrderMoney.nz(order.getPartnerFeeAmount());
+        if (
+            partnerStatus == null ||
+            !PARTNER_PICKED_UP.contains(partnerStatus.trim().toUpperCase()) ||
+            !PARTNER_CODE.equals(order.getPartnerCode()) ||
+            !notBlank(partnerOrderId) ||
+            fee.signum() <= 0
+        ) {
+            return;
+        }
+        IntegrationConfig cfg = integrationConfigRepository.findAll().stream().findFirst().orElse(null);
+        if (cfg == null || !"CASH".equalsIgnoreCase(cfg.getAhamovePaymentMethod())) {
+            return;
+        }
+        if (partnerFeeExpenseRepository.existsByPartnerOrderId(partnerOrderId)) {
+            return;
+        }
+        String confirmed = order.getPartnerShipConfirmedBy();
+        String payer = notBlank(confirmed) ? confirmed.trim() : dispatcherOf(order);
+        PartnerFeeExpense e = new PartnerFeeExpense();
+        e.setOrder(order);
+        e.setPartnerCode(PARTNER_CODE);
+        e.setPartnerOrderId(partnerOrderId);
+        e.setAmount(fee);
+        e.setPayerUsername(truncate(payer, 50));
+        e.setIncurredAt(Instant.now());
+        partnerFeeExpenseRepository.save(e);
+        orderFacadeService.recordEvent(
+            order,
+            "AHAMOVE_FEE",
+            "Phí Ahamove " + PartnerAdvance.money(fee) + "đ (" + partnerOrderId + ") · " + payer + " trả tài xế, trừ vào phiếu thu",
+            "ahamove"
+        );
+    }
+
+    /** Token webhook: query {@code ?token=} hoặc header {@code apikey}. */
+    public boolean webhookTokenValid(String token, String apikeyHeader) {
+        IntegrationConfig cfg = integrationConfigRepository.findAll().stream().findFirst().orElse(null);
+        String expected = cfg != null ? cfg.getAhamoveWebhookToken() : null;
+        if (!notBlank(expected)) {
+            return false;
+        }
+        return AutoCallService.tokenMatches(expected, token) || AutoCallService.tokenMatches(expected, apikeyHeader);
+    }
+
+    private ShipmentOrder requireOrder(String code) {
+        return shipmentOrderRepository
+            .findOneByOrderCodeOrDraftCode(code.trim())
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found: " + code));
+    }
+
+    private static String currentActor() {
+        return SecurityUtils.getCurrentUserLogin().orElse("system");
+    }
+
+    private static boolean notBlank(String s) {
+        return s != null && !s.isBlank();
+    }
+
+    /** BALANCE = ví Ahamove, CASH = trả tài xế bằng tiền mặt. Giá trị khác bỏ qua. */
+    static String payMethod(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String v = raw.trim().toUpperCase();
+        if ("CASH".equals(v) || "BALANCE".equals(v)) {
+            return v;
+        }
+        return null;
+    }
+
+    static String payMethodLabel(String raw) {
+        String v = payMethod(raw);
+        if ("CASH".equals(v)) {
+            return "tiền mặt";
+        }
+        if ("BALANCE".equals(v)) {
+            return "ví";
+        }
+        return "chưa rõ";
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        return t.length() <= max ? t : t.substring(0, max);
+    }
+
+    private static String upper(String s) {
+        return s == null ? null : s.trim().toUpperCase();
+    }
+
+    private static String text(JsonNode node, String field) {
+        if (node == null) {
+            return null;
+        }
+        JsonNode v = node.get(field);
+        if (v == null || v.isNull()) {
+            return null;
+        }
+        String s = v.asText();
+        return s == null || s.isBlank() ? null : s;
+    }
+
+    private static Double number(JsonNode node, String field) {
+        JsonNode v = node.get(field);
+        if (v == null || v.isNull()) {
+            return null;
+        }
+        if (v.isNumber()) {
+            return v.asDouble();
+        }
+        if (v.isTextual()) {
+            try {
+                return Double.parseDouble(v.asText().trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+}

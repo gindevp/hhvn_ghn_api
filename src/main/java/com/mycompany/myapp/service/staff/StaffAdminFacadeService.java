@@ -1,0 +1,268 @@
+package com.mycompany.myapp.service.staff;
+
+import com.mycompany.myapp.domain.Authority;
+import com.mycompany.myapp.domain.Office;
+import com.mycompany.myapp.domain.RoleGroup;
+import com.mycompany.myapp.domain.StaffProfile;
+import com.mycompany.myapp.domain.User;
+import com.mycompany.myapp.domain.enumeration.RoleCode;
+import com.mycompany.myapp.repository.AuthorityRepository;
+import com.mycompany.myapp.repository.OfficeRepository;
+import com.mycompany.myapp.repository.StaffProfileRepository;
+import com.mycompany.myapp.repository.UserRepository;
+import com.mycompany.myapp.security.AuthoritiesConstants;
+import com.mycompany.myapp.security.PermissionService;
+import com.mycompany.myapp.security.SecurityUtils;
+import com.mycompany.myapp.service.security.RoleGroupService;
+import com.mycompany.myapp.web.rest.errors.BadRequestAlertException;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * FE /tai-khoan fields: username, role, office, active (+ optional password).
+ */
+@Service
+@Transactional
+public class StaffAdminFacadeService {
+
+    private static final String ENTITY = "staffAdmin";
+
+    private final UserRepository userRepository;
+    private final StaffProfileRepository staffProfileRepository;
+    private final OfficeRepository officeRepository;
+    private final AuthorityRepository authorityRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final RoleGroupService roleGroupService;
+    private final PermissionService permissionService;
+    private final StaffOfficeService staffOfficeService;
+
+    public StaffAdminFacadeService(
+        UserRepository userRepository,
+        StaffProfileRepository staffProfileRepository,
+        OfficeRepository officeRepository,
+        AuthorityRepository authorityRepository,
+        PasswordEncoder passwordEncoder,
+        RoleGroupService roleGroupService,
+        PermissionService permissionService,
+        StaffOfficeService staffOfficeService
+    ) {
+        this.userRepository = userRepository;
+        this.staffProfileRepository = staffProfileRepository;
+        this.officeRepository = officeRepository;
+        this.authorityRepository = authorityRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.roleGroupService = roleGroupService;
+        this.permissionService = permissionService;
+        this.staffOfficeService = staffOfficeService;
+    }
+
+    @Transactional(readOnly = true)
+    public List<StaffUserDTO> list() {
+        List<StaffProfile> profiles = staffProfileRepository.findAll();
+        Map<Long, List<Long>> extra = staffOfficeService.extraOfficeIdsByProfile(profiles.stream().map(StaffProfile::getId).toList());
+        return profiles.stream().map(p -> toDto(p, extra.getOrDefault(p.getId(), List.of()))).toList();
+    }
+
+    public StaffUserDTO upsert(StaffUserDTO req) {
+        if (req == null || req.username() == null || req.username().isBlank()) {
+            throw new BadRequestAlertException("username required", ENTITY, "usernameRequired");
+        }
+        String login = req.username().trim().toLowerCase();
+        RoleGroup group = null;
+        if (req.roleGroupCode() != null && !req.roleGroupCode().isBlank()) {
+            group = roleGroupService
+                .findByCode(req.roleGroupCode())
+                .orElseThrow(() -> new BadRequestAlertException("Nhóm quyền không tồn tại", ENTITY, "roleGroupNotFound"));
+        }
+        RoleCode role;
+        if (group != null) {
+            role = group.getBaseRoleCode();
+        } else {
+            try {
+                role = RoleCode.valueOf(req.roleCode() == null ? "DH" : req.roleCode().trim().toUpperCase());
+            } catch (Exception ex) {
+                throw new BadRequestAlertException("Invalid roleCode", ENTITY, "invalidRole");
+            }
+            // Không chọn nhóm → dùng nhóm dựng sẵn của chức danh.
+            group = roleGroupService.findByCode(role.name()).orElse(null);
+        }
+
+        User user = userRepository.findOneByLogin(login).orElse(null);
+        if (user == null) {
+            if (req.password() == null || req.password().isBlank()) {
+                throw new BadRequestAlertException("password required for new user", ENTITY, "passwordRequired");
+            }
+            user = new User();
+            user.setLogin(login);
+            user.setActivated(Boolean.TRUE.equals(req.active()));
+            user.setPassword(passwordEncoder.encode(req.password()));
+            user.setLangKey("vi");
+            Set<Authority> authorities = new HashSet<>();
+            authorityRepository.findById(AuthoritiesConstants.USER).ifPresent(authorities::add);
+            if (role == RoleCode.AD) {
+                authorityRepository.findById(AuthoritiesConstants.ADMIN).ifPresent(authorities::add);
+            }
+            user.setAuthorities(authorities);
+            user = userRepository.save(user);
+        } else {
+            if (req.active() != null) {
+                // Tự khóa mình sẽ mất luôn đường vào (staff-admin cần ROLE_ADMIN) — chỉ mở lại được bằng DB.
+                if (Boolean.FALSE.equals(req.active()) && isCurrentUser(login)) {
+                    throw new BadRequestAlertException("Không thể khóa chính tài khoản đang đăng nhập", ENTITY, "cannotLockSelf");
+                }
+                user.setActivated(req.active());
+            }
+            if (req.password() != null && !req.password().isBlank()) {
+                user.setPassword(passwordEncoder.encode(req.password()));
+            }
+            syncAdminAuthority(user, role);
+            user = userRepository.save(user);
+        }
+
+        StaffProfile profile = staffProfileRepository.findOneByUserLoginIgnoreCase(login).orElse(null);
+        if (profile == null) {
+            profile = new StaffProfile();
+            profile.setUserLogin(login);
+            profile.setStaffCode(login.toUpperCase().replace(".", ""));
+            profile.setDisplayName(login);
+        }
+        if (req.staffCode() != null && !req.staffCode().isBlank()) {
+            String code = req.staffCode().trim().toUpperCase();
+            if (code.length() > 30) {
+                throw new BadRequestAlertException("Mã nhân viên tối đa 30 ký tự", ENTITY, "staffCodeTooLong");
+            }
+            Long selfId = profile.getId();
+            staffProfileRepository
+                .findOneByStaffCodeIgnoreCase(code)
+                .filter(other -> !other.getId().equals(selfId))
+                .ifPresent(other -> {
+                    throw new BadRequestAlertException(
+                        "Mã nhân viên " + code + " đã dùng cho tài khoản " + other.getUserLogin(),
+                        ENTITY,
+                        "staffCodeExists"
+                    );
+                });
+            profile.setStaffCode(code);
+        }
+        if (req.displayName() != null && !req.displayName().isBlank()) {
+            String name = req.displayName().trim();
+            profile.setDisplayName(name.length() > 100 ? name.substring(0, 100) : name);
+        }
+        profile.setRoleCode(role);
+        profile.setRoleGroup(group);
+        profile.setActive(req.active() == null || Boolean.TRUE.equals(req.active()));
+        boolean allOffices = req.officeCode() != null && "ALL".equalsIgnoreCase(req.officeCode());
+        profile.setScopeAllOffices(allOffices);
+        // StaffProfile.office is @NotNull — ALL scope still needs a home office (any master office).
+        Office office;
+        if (!allOffices && req.officeId() != null) {
+            office = officeRepository
+                .findById(req.officeId())
+                .orElseThrow(() -> new BadRequestAlertException("Office not found", ENTITY, "officeNotFound"));
+        } else if (!allOffices && req.officeCode() != null && !req.officeCode().isBlank()) {
+            office = officeRepository
+                .findOneByCode(req.officeCode().trim().toUpperCase())
+                .orElseThrow(() -> new BadRequestAlertException("Office not found", ENTITY, "officeNotFound"));
+        } else {
+            office = officeRepository
+                .findAll()
+                .stream()
+                .findFirst()
+                .orElseThrow(() -> new BadRequestAlertException("No office available", ENTITY, "officeMissing"));
+        }
+        profile.setOffice(office);
+        if (user.getEmail() == null || user.getEmail().isBlank()) {
+            user.setEmail(login + "@cpn.local");
+            userRepository.save(user);
+        }
+        profile = staffProfileRepository.save(profile);
+        staffOfficeService.replaceAllowed(profile, req.allowedOfficeIds());
+        permissionService.invalidateCache();
+        return toDto(
+            profile,
+            staffOfficeService.extraOfficeIdsByProfile(List.of(profile.getId())).getOrDefault(profile.getId(), List.of())
+        );
+    }
+
+    public void delete(String loginRaw) {
+        if (loginRaw == null || loginRaw.isBlank()) {
+            throw new BadRequestAlertException("username required", ENTITY, "usernameRequired");
+        }
+        String login = loginRaw.trim().toLowerCase();
+        if (isCurrentUser(login)) {
+            throw new BadRequestAlertException("Không thể xóa chính tài khoản đang đăng nhập", ENTITY, "cannotDeleteSelf");
+        }
+        staffProfileRepository
+            .findOneByUserLoginIgnoreCase(login)
+            .ifPresent(p -> {
+                staffOfficeService.replaceAllowed(p, List.of());
+                staffProfileRepository.delete(p);
+            });
+        userRepository.findOneByLogin(login).ifPresent(userRepository::delete);
+        permissionService.invalidateCache();
+    }
+
+    private boolean isCurrentUser(String login) {
+        return SecurityUtils.getCurrentUserLogin().filter(cur -> cur.equalsIgnoreCase(login)).isPresent();
+    }
+
+    /** ROLE_ADMIN follows the AD job title, and nobody may demote their own admin account. */
+    private void syncAdminAuthority(User user, RoleCode role) {
+        Set<Authority> authorities = new HashSet<>(user.getAuthorities());
+        boolean hasAdmin = authorities.stream().anyMatch(a -> AuthoritiesConstants.ADMIN.equals(a.getName()));
+        if (role == RoleCode.AD) {
+            if (!hasAdmin) {
+                authorityRepository.findById(AuthoritiesConstants.ADMIN).ifPresent(authorities::add);
+                user.setAuthorities(authorities);
+            }
+            return;
+        }
+        if (!hasAdmin) {
+            return;
+        }
+        if (isCurrentUser(user.getLogin())) {
+            throw new BadRequestAlertException("Không thể tự bỏ quyền Admin của chính mình", ENTITY, "cannotDemoteSelf");
+        }
+        authorities.removeIf(a -> AuthoritiesConstants.ADMIN.equals(a.getName()));
+        user.setAuthorities(authorities);
+    }
+
+    private StaffUserDTO toDto(StaffProfile p, List<Long> extraOfficeIds) {
+        boolean active = !Boolean.FALSE.equals(p.getActive());
+        Boolean activated = userRepository.findOneByLogin(p.getUserLogin()).map(User::isActivated).orElse(active);
+        return new StaffUserDTO(
+            p.getUserLogin(),
+            p.getRoleCode() != null ? p.getRoleCode().name() : null,
+            Boolean.TRUE.equals(p.getScopeAllOffices()) ? "ALL" : (p.getOffice() != null ? p.getOffice().getCode() : null),
+            activated,
+            null,
+            p.getRoleGroup() != null ? p.getRoleGroup().getCode() : (p.getRoleCode() != null ? p.getRoleCode().name() : null),
+            Boolean.TRUE.equals(p.getScopeAllOffices()) || p.getOffice() == null ? null : p.getOffice().getId(),
+            p.getStaffCode(),
+            p.getDisplayName(),
+            Boolean.TRUE.equals(p.getScopeAllOffices()) ? List.of() : extraOfficeIds
+        );
+    }
+
+    /**
+     * {@code officeId} ưu tiên hơn {@code officeCode}: nhiều VP có thể trùng mã (khác địa chỉ).
+     * {@code allowedOfficeIds}: VP được chuyển sang ngoài VP đang dùng; null = giữ nguyên.
+     */
+    public record StaffUserDTO(
+        String username,
+        String roleCode,
+        String officeCode,
+        Boolean active,
+        String password,
+        String roleGroupCode,
+        Long officeId,
+        String staffCode,
+        String displayName,
+        List<Long> allowedOfficeIds
+    ) {}
+}

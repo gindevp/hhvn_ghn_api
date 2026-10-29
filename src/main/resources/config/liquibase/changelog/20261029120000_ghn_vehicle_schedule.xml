@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261029120000-vehicle-schedule-trip" author="ghn">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <tableExists tableName="vehicle_schedule_trip"/>
+            </not>
+        </preConditions>
+        <comment>Master lịch chuyến nội bộ cho báo giờ xe (mode INTERNAL/HYBRID)</comment>
+        <createTable tableName="vehicle_schedule_trip">
+            <column name="id" type="bigint" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="office_id" type="bigint">
+                <constraints nullable="false"/>
+            </column>
+            <column name="itinerary_code" type="varchar(60)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="service_date" type="date">
+                <constraints nullable="false"/>
+            </column>
+            <column name="trip_code" type="varchar(60)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <column name="vehicle_plate" type="varchar(30)"/>
+            <column name="driver_name" type="varchar(120)"/>
+            <column name="route_label" type="varchar(120)"/>
+            <column name="planned_depart_at" type="datetime(6)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="active" type="boolean" defaultValueBoolean="true">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addForeignKeyConstraint
+            baseTableName="vehicle_schedule_trip"
+            baseColumnNames="office_id"
+            referencedTableName="office"
+            referencedColumnNames="id"
+            constraintName="fk_vehicle_schedule_trip_office"/>
+        <createIndex tableName="vehicle_schedule_trip" indexName="idx_vst_office_itin_date">
+            <column name="office_id"/>
+            <column name="itinerary_code"/>
+            <column name="service_date"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="20261029120000-photo-optional-default" author="ghn">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="vehicle_report_policy"/>
+        </preConditions>
+        <comment>GHN: ảnh rời VP tùy chọn (mặc định tắt bắt buộc)</comment>
+        <update tableName="vehicle_report_policy">
+            <column name="depart_photo_required" valueBoolean="false"/>
+            <where>id = 1</where>
+        </update>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,677 @@
+package com.mycompany.myapp.service.finance;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.mycompany.myapp.domain.Office;
+import com.mycompany.myapp.domain.OrderPayment;
+import com.mycompany.myapp.domain.PartnerFeeExpense;
+import com.mycompany.myapp.domain.Receipt;
+import com.mycompany.myapp.domain.ReceiptOrderLine;
+import com.mycompany.myapp.domain.ReceiptWaiver;
+import com.mycompany.myapp.domain.ShipmentOrder;
+import com.mycompany.myapp.domain.enumeration.OrderStatus;
+import com.mycompany.myapp.domain.enumeration.PaymentKind;
+import com.mycompany.myapp.domain.enumeration.PaymentTerm;
+import com.mycompany.myapp.repository.AuditLogRepository;
+import com.mycompany.myapp.repository.DayClosureRepository;
+import com.mycompany.myapp.repository.OfficeRepository;
+import com.mycompany.myapp.repository.OrderEventRepository;
+import com.mycompany.myapp.repository.OrderPaymentRepository;
+import com.mycompany.myapp.repository.PartnerFeeExpenseRepository;
+import com.mycompany.myapp.repository.ReceiptOrderLineRepository;
+import com.mycompany.myapp.repository.ReceiptRepository;
+import com.mycompany.myapp.repository.ReceiptWaiverRepository;
+import com.mycompany.myapp.repository.ShipmentOrderRepository;
+import com.mycompany.myapp.repository.StaffProfileRepository;
+import com.mycompany.myapp.security.StaffAccessService;
+import com.mycompany.myapp.service.audit.AuditRecorder;
+import com.mycompany.myapp.service.day.DayClosureGuard;
+import com.mycompany.myapp.service.finance.FinanceFacadeService.CreateReceiptRequest;
+import com.mycompany.myapp.service.finance.FinanceFacadeService.ReceiptDTO;
+import com.mycompany.myapp.service.finance.FinanceFacadeService.ReceiptLineRequest;
+import com.mycompany.myapp.service.finance.FinanceFacadeService.WaiveItem;
+import com.mycompany.myapp.service.finance.FinanceFacadeService.WaiveRequest;
+import com.mycompany.myapp.web.rest.errors.BadRequestAlertException;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.server.ResponseStatusException;
+
+/**
+ * Phiếu thu gồm COD: tổng line = fareDue + cod; paidAmount chỉ tăng phần cước.
+ */
+@ExtendWith(MockitoExtension.class)
+class FinanceFacadeServiceReceiptCodTest {
+
+    @Mock
+    private ShipmentOrderRepository shipmentOrderRepository;
+
+    @Mock
+    private ReceiptRepository receiptRepository;
+
+    @Mock
+    private ReceiptOrderLineRepository receiptOrderLineRepository;
+
+    @Mock
+    private DayClosureRepository dayClosureRepository;
+
+    @Mock
+    private OfficeRepository officeRepository;
+
+    @Mock
+    private OrderPaymentRepository orderPaymentRepository;
+
+    @Mock
+    private OrderEventRepository orderEventRepository;
+
+    @Mock
+    private StaffProfileRepository staffProfileRepository;
+
+    @Mock
+    private DayClosureGuard dayClosureGuard;
+
+    @Mock
+    private ReceiptWaiverRepository receiptWaiverRepository;
+
+    @Mock
+    private AuditRecorder auditRecorder;
+
+    @Mock
+    private AuditLogRepository auditLogRepository;
+
+    @Mock
+    private StaffAccessService staffAccessService;
+
+    @Mock
+    private PartnerFeeExpenseRepository partnerFeeExpenseRepository;
+
+    private FinanceFacadeService service;
+    private ShipmentOrder order;
+
+    @BeforeEach
+    void setUp() {
+        service = new FinanceFacadeService(
+            shipmentOrderRepository,
+            receiptRepository,
+            receiptOrderLineRepository,
+            dayClosureRepository,
+            officeRepository,
+            orderPaymentRepository,
+            orderEventRepository,
+            staffProfileRepository,
+            dayClosureGuard,
+            receiptWaiverRepository,
+            auditRecorder,
+            auditLogRepository,
+            staffAccessService,
+            partnerFeeExpenseRepository
+        );
+
+        order = new ShipmentOrder();
+        order.setId(1L);
+        order.setOrderCode("GP-COD-001");
+        order.setFareAmount(new BigDecimal("40000"));
+        order.setPaidAmount(new BigDecimal("10000"));
+        order.setCodAmount(new BigDecimal("50000"));
+        order.setStatus(OrderStatus.DELIVERED);
+        order.setPaymentTerm(PaymentTerm.NHAN_TRA);
+
+        lenient().when(shipmentOrderRepository.findOneByOrderCodeOrDraftCode("GP-COD-001")).thenReturn(Optional.of(order));
+        lenient().when(orderPaymentRepository.save(any(OrderPayment.class))).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(shipmentOrderRepository.save(any(ShipmentOrder.class))).thenAnswer(inv -> inv.getArgument(0));
+        lenient().when(receiptOrderLineRepository.save(any(ReceiptOrderLine.class))).thenAnswer(inv -> inv.getArgument(0));
+        AtomicLong id = new AtomicLong(10);
+        lenient()
+            .when(receiptRepository.save(any(Receipt.class)))
+            .thenAnswer(inv -> {
+                Receipt r = inv.getArgument(0);
+                r.setId(id.getAndIncrement());
+                if (r.getReceiptCode() == null) {
+                    r.setReceiptCode("PT-TEST-1");
+                }
+                return r;
+            });
+        lenient().when(receiptRepository.countByReceiptCodeStartingWith(any())).thenReturn(0L);
+    }
+
+    @Test
+    void createReceipt_pendingAhamoveAdvance_rejectedUntilCatchUpConfirm() {
+        order.setFareAmount(new BigDecimal("200000"));
+        order.setPaidAmount(BigDecimal.ZERO);
+        order.setCodAmount(BigDecimal.ZERO);
+        order.setPartnerCode("AHAMOVE");
+        order.setPartnerOrderId("26FUMUT9");
+        order.setPartnerCodAmount(new BigDecimal("200000"));
+
+        assertThatThrownBy(() ->
+            service.createReceipt(
+                new CreateReceiptRequest(
+                    "Người book",
+                    "xe01646",
+                    null,
+                    List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("200000"), ReceiptSettlement.DELIVERY))
+                )
+            )
+        )
+            .isInstanceOf(BadRequestAlertException.class)
+            .hasMessageContaining("xác nhận bù")
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("shipConfirmRequired");
+        verify(receiptRepository, never()).save(any());
+        verify(orderPaymentRepository, never()).save(any());
+    }
+
+    @Test
+    void createReceipt_cancelledAhamoveCounterPod_allowed() {
+        order.setFareAmount(new BigDecimal("120000"));
+        order.setPaidAmount(new BigDecimal("120000"));
+        order.setCodAmount(BigDecimal.ZERO);
+        order.setPartnerCode("AHAMOVE");
+        order.setPartnerOrderId("26TSXVH1");
+        order.setPartnerStatus("CANCELLED");
+        order.setPartnerCodAmount(new BigDecimal("240000"));
+        when(orderPaymentRepository.sumGroupedByOrderIds(any())).thenReturn(
+            List.<Object[]>of(new Object[] { 1L, PaymentKind.SAU, "POD COUNTER", new BigDecimal("120000") })
+        );
+
+        ReceiptDTO dto = service.createReceipt(
+            new CreateReceiptRequest(
+                "NV quầy",
+                "xe01640",
+                null,
+                List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("120000"), ReceiptSettlement.DELIVERY))
+            )
+        );
+
+        assertThat(dto.totalAmount()).isEqualByComparingTo("120000");
+        verify(receiptRepository).save(any());
+    }
+
+    @Test
+    void createReceipt_splitsFareAndCod_paidOnlyFare() {
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            "NVA",
+            null,
+            List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("80000"), ReceiptSettlement.DELIVERY))
+        );
+
+        ReceiptDTO dto = service.createReceipt(req);
+
+        assertThat(dto.totalAmount()).isEqualByComparingTo("80000");
+        assertThat(order.getPaidAmount()).isEqualByComparingTo("40000"); // 10000 + 30000 fare due
+
+        ArgumentCaptor<OrderPayment> payCap = ArgumentCaptor.forClass(OrderPayment.class);
+        verify(orderPaymentRepository, org.mockito.Mockito.times(2)).save(payCap.capture());
+        List<OrderPayment> pays = payCap.getAllValues();
+        assertThat(pays).anySatisfy(p -> {
+            assertThat(p.getPaymentKind()).isEqualTo(PaymentKind.SAU);
+            assertThat(p.getAmount()).isEqualByComparingTo("30000");
+            assertThat(p.getNote()).isEqualTo("RECEIPT");
+        });
+        assertThat(pays).anySatisfy(p -> {
+            assertThat(p.getPaymentKind()).isEqualTo(PaymentKind.COD);
+            assertThat(p.getAmount()).isEqualByComparingTo("50000");
+            assertThat(p.getNote()).isEqualTo("RECEIPT_COD");
+        });
+
+        ArgumentCaptor<com.mycompany.myapp.domain.OrderEvent> evCap = ArgumentCaptor.forClass(com.mycompany.myapp.domain.OrderEvent.class);
+        verify(orderEventRepository).save(evCap.capture());
+        assertThat(evCap.getValue().getAction()).isEqualTo("RECEIPT_CREATE");
+        assertThat(evCap.getValue().getDetail()).isEqualTo(dto.receiptCode() + " · 80.000 đ");
+        assertThat(evCap.getValue().getOrder()).isSameAs(order);
+    }
+
+    @Test
+    void createReceipt_skipsCodeStillUsedAfterDeletedReceipt() {
+        when(receiptRepository.countByReceiptCodeStartingWith(any())).thenReturn(5L);
+        when(receiptRepository.existsByReceiptCode(org.mockito.ArgumentMatchers.endsWith("-006"))).thenReturn(true);
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            null,
+            null,
+            List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("50000"), null))
+        );
+
+        ReceiptDTO dto = service.createReceipt(req);
+
+        assertThat(dto.receiptCode()).endsWith("-007");
+    }
+
+    @Test
+    void createReceipt_rejectsAboveFareDuePlusCod() {
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            null,
+            null,
+            List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("80001"), ReceiptSettlement.DELIVERY))
+        );
+
+        assertThatThrownBy(() -> service.createReceipt(req))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("amountExceedsDue");
+
+        verify(orderPaymentRepository, never()).save(any());
+        assertThat(order.getPaidAmount()).isEqualByComparingTo("10000");
+    }
+
+    @Test
+    void createReceipt_codOnly_whenFareAlreadyPaid() {
+        order.setPaidAmount(new BigDecimal("40000"));
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            null,
+            null,
+            List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("50000"), null))
+        );
+
+        ReceiptDTO dto = service.createReceipt(req);
+
+        assertThat(dto.totalAmount()).isEqualByComparingTo("50000");
+        assertThat(order.getPaidAmount()).isEqualByComparingTo("40000");
+
+        ArgumentCaptor<OrderPayment> payCap = ArgumentCaptor.forClass(OrderPayment.class);
+        verify(orderPaymentRepository).save(payCap.capture());
+        assertThat(payCap.getValue().getPaymentKind()).isEqualTo(PaymentKind.COD);
+        assertThat(payCap.getValue().getAmount()).isEqualByComparingTo("50000");
+    }
+
+    @Test
+    void waiveDues_rejectsNonAdmin() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(false);
+
+        assertThatThrownBy(() -> service.waiveDues(new WaiveRequest("x", List.of(new WaiveItem("GP-COD-001", null))))).isInstanceOf(
+            ResponseStatusException.class
+        );
+        verify(receiptWaiverRepository, never()).save(any());
+    }
+
+    @Test
+    void waiveDues_requiresReason() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+
+        assertThatThrownBy(() -> service.waiveDues(new WaiveRequest("  ", List.of(new WaiveItem("GP-COD-001", null)))))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("waiveReasonRequired");
+    }
+
+    @Test
+    void waiveDues_savesOutstandingDeliveryAndAudits() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+
+        var result = service.waiveDues(new WaiveRequest("Khách bùng", List.of(new WaiveItem("GP-COD-001", ReceiptSettlement.DELIVERY))));
+
+        ArgumentCaptor<ReceiptWaiver> cap = ArgumentCaptor.forClass(ReceiptWaiver.class);
+        verify(receiptWaiverRepository).save(cap.capture());
+        assertThat(cap.getValue().getPortion()).isEqualTo(ReceiptSettlement.DELIVERY);
+        assertThat(cap.getValue().getAmount()).isEqualByComparingTo("80000");
+        assertThat(cap.getValue().getReason()).isEqualTo("Khách bùng");
+        assertThat(result.count()).isEqualTo(1);
+        verify(auditRecorder).record(eq("RECEIPT_DUE_WAIVE"), eq("ReceiptDue"), eq("GP-COD-001"), anyString());
+    }
+
+    @Test
+    void assertNoHeldMoney_blocksCancelWhenCollectedNotSubmitted() {
+        order.setStatus(OrderStatus.CONFIRMED);
+
+        assertThatThrownBy(() -> service.assertNoHeldMoney("GP-COD-001"))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("cancelHasHeldMoney");
+    }
+
+    @Test
+    void assertNoHeldMoney_allowsWhenNothingCollected() {
+        order.setStatus(OrderStatus.CONFIRMED);
+        order.setPaidAmount(BigDecimal.ZERO);
+
+        service.assertNoHeldMoney("GP-COD-001");
+    }
+
+    @Test
+    void assertNoHeldMoney_allowsAfterWaive() {
+        order.setStatus(OrderStatus.CONFIRMED);
+        when(receiptWaiverRepository.sumByOrderIds(any())).thenReturn(
+            List.<Object[]>of(new Object[] { 1L, ReceiptSettlement.SENDER, new BigDecimal("10000") })
+        );
+
+        service.assertNoHeldMoney("GP-COD-001");
+    }
+
+    @Test
+    void settleHeldMoneyForCancel_adminWaivesHeldMoney() {
+        order.setStatus(OrderStatus.CONFIRMED);
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+
+        service.settleHeldMoneyForCancel("GP-COD-001", "Khách không gửi nữa");
+
+        ArgumentCaptor<ReceiptWaiver> cap = ArgumentCaptor.forClass(ReceiptWaiver.class);
+        verify(receiptWaiverRepository).save(cap.capture());
+        assertThat(cap.getValue().getPortion()).isEqualTo(ReceiptSettlement.SENDER);
+        assertThat(cap.getValue().getAmount()).isEqualByComparingTo("10000");
+        assertThat(cap.getValue().getReason()).isEqualTo("Huỷ đơn · Khách không gửi nữa");
+        verify(auditRecorder).record(eq("RECEIPT_DUE_WAIVE"), eq("ReceiptDue"), eq("GP-COD-001"), anyString());
+    }
+
+    @Test
+    void settleHeldMoneyForCancel_nonAdminStillBlocked() {
+        order.setStatus(OrderStatus.CONFIRMED);
+        when(staffAccessService.isSystemAdmin()).thenReturn(false);
+
+        assertThatThrownBy(() -> service.settleHeldMoneyForCancel("GP-COD-001", "x"))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("cancelHasHeldMoney");
+        verify(receiptWaiverRepository, never()).save(any());
+    }
+
+    @Test
+    void settleHeldMoneyForCancel_adminNoopWhenNothingHeld() {
+        order.setStatus(OrderStatus.CONFIRMED);
+        order.setPaidAmount(BigDecimal.ZERO);
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+
+        service.settleHeldMoneyForCancel("GP-COD-001", "x");
+
+        verify(receiptWaiverRepository, never()).save(any());
+    }
+
+    private static OrderPayment payment(PaymentKind kind, String amount, String note, Instant at, String collector) {
+        OrderPayment p = new OrderPayment();
+        p.setPaymentKind(kind);
+        p.setAmount(new BigDecimal(amount));
+        p.setNote(note);
+        p.setPaymentAt(at);
+        p.setCollectorUsername(collector);
+        return p;
+    }
+
+    @Test
+    void cancelReceipt_rejectsNonAdmin() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(false);
+
+        assertThatThrownBy(() -> service.cancelReceipt("PT-1", "sai")).isInstanceOf(ResponseStatusException.class);
+        verify(receiptRepository, never()).delete(any(Receipt.class));
+    }
+
+    @Test
+    void cancelReceipt_requiresReason() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+
+        assertThatThrownBy(() -> service.cancelReceipt("PT-1", " "))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("receiptCancelReasonRequired");
+    }
+
+    @Test
+    void confirmReceipt_savesNote_andUnconfirmClearsIt() {
+        Receipt receipt = new Receipt();
+        receipt.setId(7L);
+        receipt.setReceiptCode("PT-7");
+        receipt.setPayerName("NV A");
+        receipt.setTotalAmount(new BigDecimal("80000"));
+        when(receiptRepository.findOneByReceiptCode("PT-7")).thenReturn(Optional.of(receipt));
+        when(receiptOrderLineRepository.findByReceipt_Id(any())).thenReturn(List.of());
+
+        ReceiptDTO dto = service.confirmReceipt(
+            "PT-7",
+            new FinanceFacadeService.ConfirmReceiptRequest("data:img", "  Cấn trừ 20k đơn X  ", null)
+        );
+
+        assertThat(dto.confirmNote()).isEqualTo("Cấn trừ 20k đơn X");
+        verify(auditRecorder).record(
+            eq("RECEIPT_CONFIRM"),
+            eq("Receipt"),
+            eq("PT-7"),
+            org.mockito.ArgumentMatchers.contains("Cấn trừ 20k")
+        );
+
+        service.unconfirmReceipt("PT-7");
+        assertThat(receipt.getConfirmNote()).isNull();
+    }
+
+    @Test
+    void confirmReceipt_multipleProofs_storedAndReturned_unconfirmClears() {
+        Receipt receipt = new Receipt();
+        receipt.setId(9L);
+        receipt.setReceiptCode("PT-9");
+        receipt.setPayerName("NV A");
+        receipt.setTotalAmount(new BigDecimal("80000"));
+        receipt.setTransferProofImage("data:staff");
+        when(receiptRepository.findOneByReceiptCode("PT-9")).thenReturn(Optional.of(receipt));
+        when(receiptOrderLineRepository.findByReceipt_Id(any())).thenReturn(List.of());
+
+        service.confirmReceipt(
+            "PT-9",
+            new FinanceFacadeService.ConfirmReceiptRequest(null, null, List.of("data:a", " ", "data:b", "data:c"))
+        );
+
+        assertThat(receipt.getConfirmProofImage()).isEqualTo("data:a");
+        assertThat(receipt.getConfirmProofExtra()).isEqualTo("data:b\ndata:c");
+        assertThat(service.receiptProofImages("PT-9")).containsExactly("data:a", "data:b", "data:c");
+
+        service.unconfirmReceipt("PT-9");
+        assertThat(receipt.getConfirmProofImage()).isNull();
+        assertThat(receipt.getConfirmProofExtra()).isNull();
+        assertThat(service.receiptProofImages("PT-9")).containsExactly("data:staff");
+    }
+
+    @Test
+    void confirmReceipt_rejectsMoreThanFiveProofs() {
+        Receipt receipt = new Receipt();
+        receipt.setReceiptCode("PT-10");
+        lenient().when(receiptRepository.findOneByReceiptCode("PT-10")).thenReturn(Optional.of(receipt));
+
+        assertThatThrownBy(() ->
+            service.confirmReceipt(
+                "PT-10",
+                new FinanceFacadeService.ConfirmReceiptRequest(null, null, List.of("1", "2", "3", "4", "5", "6"))
+            )
+        )
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("receiptProofTooMany");
+        verify(receiptRepository, never()).save(any());
+    }
+
+    @Test
+    void confirmReceipt_rejectsNoteOver1000() {
+        Receipt receipt = new Receipt();
+        receipt.setReceiptCode("PT-8");
+        when(receiptRepository.findOneByReceiptCode("PT-8")).thenReturn(Optional.of(receipt));
+
+        assertThatThrownBy(() ->
+            service.confirmReceipt("PT-8", new FinanceFacadeService.ConfirmReceiptRequest("data:img", "x".repeat(1001), null))
+        )
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("receiptNoteTooLong");
+        verify(receiptRepository, never()).save(any());
+    }
+
+    @Test
+    void cancelReceipt_reversesOnlyReceiptPaymentsAndAudits() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+        Instant at = Instant.parse("2025-05-01T03:00:00Z");
+        Receipt receipt = new Receipt();
+        receipt.setId(5L);
+        receipt.setReceiptCode("PT-1");
+        receipt.setPayerName("NV A");
+        receipt.setTotalAmount(new BigDecimal("80000"));
+        receipt.setCreatedAt(at);
+        receipt.setCreatedByUsername("dp1");
+        ReceiptOrderLine line = new ReceiptOrderLine();
+        line.setOrder(order);
+        line.setReceipt(receipt);
+        line.setAmountCollected(new BigDecimal("80000"));
+        order.setPaidAmount(new BigDecimal("40000"));
+        OrderPayment fare = payment(PaymentKind.SAU, "30000", "RECEIPT", at, "dp1");
+        OrderPayment cod = payment(PaymentKind.COD, "50000", "RECEIPT_COD", at, "dp1");
+        OrderPayment prepaid = payment(PaymentKind.SAU, "10000", null, at.minusSeconds(3600), "dp1");
+        when(receiptRepository.findOneByReceiptCode("PT-1")).thenReturn(Optional.of(receipt));
+        when(receiptOrderLineRepository.findByReceipt_Id(5L)).thenReturn(List.of(line));
+        when(orderPaymentRepository.findByOrder_IdOrderByPaymentAtDesc(1L)).thenReturn(List.of(fare, cod, prepaid));
+
+        service.cancelReceipt("PT-1", "Lập nhầm");
+
+        assertThat(order.getPaidAmount()).isEqualByComparingTo("10000");
+        verify(orderPaymentRepository).delete(fare);
+        verify(orderPaymentRepository).delete(cod);
+        verify(orderPaymentRepository, never()).delete(prepaid);
+        verify(dayClosureGuard).assertCollectionMutable(order);
+        verify(receiptOrderLineRepository).deleteAll(List.of(line));
+        verify(receiptRepository).delete(receipt);
+        verify(auditRecorder).record(eq("RECEIPT_CANCEL"), eq("Receipt"), eq("PT-1"), org.mockito.ArgumentMatchers.contains("Lập nhầm"));
+    }
+
+    private PartnerFeeExpense fee(String orderCode, long orderId, String amount, String payer) {
+        ShipmentOrder o = new ShipmentOrder();
+        o.setId(orderId);
+        o.setOrderCode(orderCode);
+        o.setStatus(OrderStatus.DELIVERED);
+        lenient().when(shipmentOrderRepository.findOneByOrderCodeOrDraftCode(orderCode)).thenReturn(Optional.of(o));
+        PartnerFeeExpense e = new PartnerFeeExpense();
+        e.setId(orderId * 100);
+        e.setOrder(o);
+        e.setPartnerCode("AHAMOVE");
+        e.setPartnerOrderId("AH" + orderId);
+        e.setAmount(new BigDecimal(amount));
+        e.setPayerUsername(payer);
+        e.setIncurredAt(Instant.now());
+        return e;
+    }
+
+    @Test
+    void createReceipt_deductsPartnerFeeFromTotal() {
+        PartnerFeeExpense e = fee("AH-ORDER", 2L, "32000", "nva");
+        when(partnerFeeExpenseRepository.findOpenByOrderAndPayer(2L, "NVA")).thenReturn(List.of(e));
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            "NVA",
+            null,
+            List.of(
+                new ReceiptLineRequest("GP-COD-001", new BigDecimal("80000"), ReceiptSettlement.DELIVERY),
+                new ReceiptLineRequest("AH-ORDER", new BigDecimal("-32000"), FinanceFacadeService.PARTNER_FEE)
+            )
+        );
+
+        ReceiptDTO dto = service.createReceipt(req);
+
+        assertThat(dto.totalAmount()).isEqualByComparingTo("48000");
+        assertThat(dto.lines()).hasSize(1);
+        assertThat(e.getReceipt()).isNotNull();
+        assertThat(e.getReceipt().getReceiptCode()).isEqualTo(dto.receiptCode());
+        verify(partnerFeeExpenseRepository).save(e);
+        verify(receiptOrderLineRepository, org.mockito.Mockito.times(1)).save(any(ReceiptOrderLine.class));
+    }
+
+    @Test
+    void createReceipt_feeOnly_negativeTotalAllowed() {
+        PartnerFeeExpense e = fee("AH-ORDER", 2L, "32000", "nva");
+        when(partnerFeeExpenseRepository.findOpenByOrderAndPayer(2L, "NVA")).thenReturn(List.of(e));
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            "NVA",
+            null,
+            List.of(new ReceiptLineRequest("AH-ORDER", new BigDecimal("-32000"), FinanceFacadeService.PARTNER_FEE))
+        );
+
+        ReceiptDTO dto = service.createReceipt(req);
+
+        assertThat(dto.totalAmount()).isEqualByComparingTo("-32000");
+        assertThat(e.getReceipt()).isNotNull();
+    }
+
+    @Test
+    void createReceipt_rejectsChangedPartnerFee() {
+        PartnerFeeExpense e = fee("AH-ORDER", 2L, "32000", "nva");
+        when(partnerFeeExpenseRepository.findOpenByOrderAndPayer(2L, "NVA")).thenReturn(List.of(e));
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            "NVA",
+            null,
+            List.of(new ReceiptLineRequest("AH-ORDER", new BigDecimal("-30000"), FinanceFacadeService.PARTNER_FEE))
+        );
+
+        assertThatThrownBy(() -> service.createReceipt(req))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("partnerFeeChanged");
+        verify(receiptRepository, never()).save(any());
+    }
+
+    @Test
+    void createReceipt_rejectsFeeNotOpenForPayer() {
+        fee("AH-ORDER", 2L, "32000", "other");
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            "NVA",
+            null,
+            List.of(new ReceiptLineRequest("AH-ORDER", new BigDecimal("-32000"), FinanceFacadeService.PARTNER_FEE))
+        );
+
+        assertThatThrownBy(() -> service.createReceipt(req))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("partnerFeeNotOpen");
+    }
+
+    @Test
+    void cancelReceipt_releasesPartnerFee() {
+        when(staffAccessService.isSystemAdmin()).thenReturn(true);
+        Receipt receipt = new Receipt();
+        receipt.setId(6L);
+        receipt.setReceiptCode("PT-6");
+        receipt.setPayerName("NV A");
+        receipt.setTotalAmount(new BigDecimal("-32000"));
+        receipt.setCreatedAt(Instant.now());
+        PartnerFeeExpense e = fee("AH-ORDER", 2L, "32000", "nva");
+        e.setReceipt(receipt);
+        when(receiptRepository.findOneByReceiptCode("PT-6")).thenReturn(Optional.of(receipt));
+        when(receiptOrderLineRepository.findByReceipt_Id(6L)).thenReturn(List.of());
+        when(partnerFeeExpenseRepository.findByReceipt_Id(6L)).thenReturn(List.of(e));
+
+        service.cancelReceipt("PT-6", "Lập nhầm");
+
+        assertThat(e.getReceipt()).isNull();
+        verify(partnerFeeExpenseRepository).save(e);
+        verify(receiptRepository).delete(receipt);
+    }
+
+    @Test
+    void createReceipt_rejectsWaivedAmount() {
+        when(receiptWaiverRepository.sumByOrderIds(any())).thenReturn(
+            List.<Object[]>of(new Object[] { 1L, ReceiptSettlement.DELIVERY, new BigDecimal("80000") })
+        );
+        CreateReceiptRequest req = new CreateReceiptRequest(
+            "NV A",
+            null,
+            null,
+            List.of(new ReceiptLineRequest("GP-COD-001", new BigDecimal("1000"), ReceiptSettlement.DELIVERY))
+        );
+
+        assertThatThrownBy(() -> service.createReceipt(req))
+            .isInstanceOf(BadRequestAlertException.class)
+            .extracting(ex -> ((BadRequestAlertException) ex).getErrorKey())
+            .isEqualTo("amountExceedsDue");
+    }
+}

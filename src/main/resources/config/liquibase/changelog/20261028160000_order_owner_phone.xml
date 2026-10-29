@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261028160000-order-owner-phone" author="cpn">
+        <preConditions onFail="MARK_RAN">
+            <not>
+                <columnExists tableName="shipment_order" columnName="owner_phone"/>
+            </not>
+        </preConditions>
+        <comment>SĐT tài khoản khách tạo đơn (web khách đã đăng nhập / app chọn vé) — xem đơn ở cả web và app.</comment>
+        <addColumn tableName="shipment_order">
+            <column name="owner_phone" type="varchar(20)"/>
+        </addColumn>
+        <createIndex tableName="shipment_order" indexName="idx_shipment_order_owner_phone">
+            <column name="owner_phone"/>
+        </createIndex>
+    </changeSet>
+</databaseChangeLog>

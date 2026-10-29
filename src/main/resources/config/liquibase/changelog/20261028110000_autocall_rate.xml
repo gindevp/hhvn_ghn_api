@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261028110000-1" author="cpn">
+        <addColumn tableName="integration_config">
+            <column name="autocall_rate_big3_per_min" type="integer" defaultValueNumeric="420">
+                <constraints nullable="false"/>
+            </column>
+            <column name="autocall_rate_other_first_sec" type="integer" defaultValueNumeric="6">
+                <constraints nullable="false"/>
+            </column>
+            <column name="autocall_rate_other_first_fee" type="integer" defaultValueNumeric="102">
+                <constraints nullable="false"/>
+            </column>
+            <column name="autocall_rate_other_per_sec" type="integer" defaultValueNumeric="17">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,17 @@
+target/
+.idea/
+*.iml
+.git/
+.gitignore
+node_modules/
+src/main/webapp/
+*.md
+.vscode/
+.DS_Store
+.husky/
+.devcontainer/
+webpack/
+*.log
+runtime-*.json
+runtime-*.log
+build-*.log

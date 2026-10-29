@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <changeSet id="20261026120000-1" author="cpn">
+        <addColumn tableName="integration_config">
+            <column name="gapone_client_id" type="varchar(128)"/>
+            <column name="gapone_client_secret" type="varchar(512)"/>
+            <column name="gapone_oa_id" type="varchar(64)"/>
+            <column name="gapone_access_token" type="varchar(2000)"/>
+            <column name="gapone_token_expires_at" type="${datetimeType}"/>
+            <column name="gapone_webhook_token" type="varchar(64)"/>
+        </addColumn>
+    </changeSet>
+</databaseChangeLog>
