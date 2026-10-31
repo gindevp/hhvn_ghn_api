@@ -2143,45 +2143,60 @@ public class OrderFacadeService {
      */
     public Map<String, Object> backfillMissingSenderPrepaid(boolean dryRun, int limit, String orderCode) {
         int cap = Math.max(1, Math.min(limit <= 0 ? 200 : limit, 1000));
-        List<ShipmentOrder> candidates;
-        if (orderCode != null && !orderCode.isBlank()) {
-            ShipmentOrder one = requireByCode(orderCode.trim());
-            candidates = List.of(one);
-        } else {
-            candidates = shipmentOrderRepository.findGuiTraDueLikelyMissingPrepaid(PageRequest.of(0, cap * 3));
-        }
         List<Map<String, Object>> fixed = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
         int applied = 0;
-        for (ShipmentOrder order : candidates) {
-            if (applied >= cap) {
-                break;
+        int page = 0;
+        final int pageSize = 100;
+        while (applied < cap && page < 80) {
+            List<ShipmentOrder> candidates;
+            if (orderCode != null && !orderCode.isBlank()) {
+                if (page > 0) {
+                    break;
+                }
+                candidates = List.of(requireByCode(orderCode.trim()));
+            } else {
+                candidates = shipmentOrderRepository.findGuiTraDueLikelyMissingPrepaid(PageRequest.of(page, pageSize));
+                if (candidates.isEmpty()) {
+                    break;
+                }
             }
-            String reason = missingSenderPrepaidSkipReason(order);
-            if (reason != null) {
-                skipped.add(Map.of("orderCode", order.getOrderCode(), "reason", reason));
-                continue;
-            }
-            BigDecimal due = OrderMoney.collectDue(order);
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("orderCode", order.getOrderCode());
-            row.put("status", order.getStatus() != null ? order.getStatus().name() : null);
-            row.put("fareAmount", OrderMoney.nz(order.getFareAmount()));
-            row.put("paidAmount", OrderMoney.nz(order.getPaidAmount()));
-            row.put("due", due);
-            if (!dryRun) {
-                boolean ok = recordSenderPrepaid(order, true, "backfill thiếu thu tạo quầy");
-                row.put("applied", ok);
-                if (ok) {
+            for (ShipmentOrder order : candidates) {
+                if (applied >= cap) {
+                    break;
+                }
+                String reason = missingSenderPrepaidSkipReason(order);
+                if (reason != null) {
+                    if (skipped.size() < 100) {
+                        skipped.add(Map.of("orderCode", order.getOrderCode(), "reason", reason));
+                    }
+                    continue;
+                }
+                BigDecimal due = OrderMoney.collectDue(order);
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("orderCode", order.getOrderCode());
+                row.put("status", order.getStatus() != null ? order.getStatus().name() : null);
+                row.put("fareAmount", OrderMoney.nz(order.getFareAmount()));
+                row.put("paidAmount", OrderMoney.nz(order.getPaidAmount()));
+                row.put("due", due);
+                if (!dryRun) {
+                    boolean ok = recordSenderPrepaid(order, true, "backfill thiếu thu tạo quầy");
+                    row.put("applied", ok);
+                    if (ok) {
+                        applied++;
+                        fixed.add(row);
+                    } else if (skipped.size() < 100) {
+                        skipped.add(Map.of("orderCode", order.getOrderCode(), "reason", "record_failed"));
+                    }
+                } else {
                     applied++;
                     fixed.add(row);
-                } else {
-                    skipped.add(Map.of("orderCode", order.getOrderCode(), "reason", "record_failed"));
                 }
-            } else {
-                applied++;
-                fixed.add(row);
             }
+            if (orderCode != null && !orderCode.isBlank()) {
+                break;
+            }
+            page++;
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("dryRun", dryRun);

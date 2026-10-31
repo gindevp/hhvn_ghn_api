@@ -1,6 +1,7 @@
 package com.mycompany.myapp.config;
 
 import com.mycompany.myapp.service.order.OrderFacadeService;
+import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +37,17 @@ public class SenderPrepaidBackfillRunner implements ApplicationRunner {
         }
         int total = 0;
         try {
+            for (String code : List.of("NB311096VX", "BC3110FTZF")) {
+                try {
+                    Map<String, Object> one = orderFacadeService.backfillMissingSenderPrepaid(false, 1, code);
+                    Object fixed = one.get("fixedCount");
+                    int n = fixed instanceof Number ? ((Number) fixed).intValue() : 0;
+                    total += n;
+                    LOG.info("Sender prepaid backfill {}: fixed={} skipped={}", code, n, one.get("skipped"));
+                } catch (Exception ex) {
+                    LOG.warn("Sender prepaid backfill {} failed: {}", code, ex.toString());
+                }
+            }
             for (int i = 0; i < 30; i++) {
                 Map<String, Object> out = orderFacadeService.backfillMissingSenderPrepaid(false, 200, null);
                 Object fixed = out.get("fixedCount");
