@@ -9,6 +9,7 @@ import com.mycompany.myapp.service.finance.FinanceFacadeService;
 import com.mycompany.myapp.service.report.BusinessReportService;
 import com.mycompany.myapp.service.report.InventoryHourlyReportService;
 import com.mycompany.myapp.service.report.RevenueReportService;
+import com.mycompany.myapp.service.report.RouteRevenueReportService;
 import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.Map;
@@ -25,6 +26,7 @@ public class ReportsResource {
     private final InventoryHourlyReportService inventoryHourlyReportService;
     private final BusinessReportService businessReportService;
     private final RevenueReportService revenueReportService;
+    private final RouteRevenueReportService routeRevenueReportService;
     private final StaffAccessService staffAccessService;
 
     public ReportsResource(
@@ -34,6 +36,7 @@ public class ReportsResource {
         InventoryHourlyReportService inventoryHourlyReportService,
         BusinessReportService businessReportService,
         RevenueReportService revenueReportService,
+        RouteRevenueReportService routeRevenueReportService,
         StaffAccessService staffAccessService
     ) {
         this.shipmentOrderRepository = shipmentOrderRepository;
@@ -42,6 +45,7 @@ public class ReportsResource {
         this.inventoryHourlyReportService = inventoryHourlyReportService;
         this.businessReportService = businessReportService;
         this.revenueReportService = revenueReportService;
+        this.routeRevenueReportService = routeRevenueReportService;
         this.staffAccessService = staffAccessService;
     }
 
@@ -84,6 +88,16 @@ public class ReportsResource {
     ) {
         staffAccessService.requireScreenRead(ScreenKey.BAO_CAO_DOANH_THU);
         return revenueReportService.revenue(from, to, officeCode, kind);
+    }
+
+    /** Doanh thu theo tuyến (điểm nhận): ma trận ngày × tuyến trên Dashboard. */
+    @GetMapping("/revenue-by-route")
+    public RouteRevenueReportService.Report revenueByRoute(
+        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+        @RequestParam(required = false) String officeCode
+    ) {
+        return routeRevenueReportService.report(from, to, officeCode);
     }
 
     @GetMapping("/collections")
