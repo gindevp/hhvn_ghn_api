@@ -52,6 +52,7 @@ public class SecurityConfiguration {
                     .requestMatchers(mvc.pattern("/api/account/reset-password/finish")).permitAll()
                     .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest")).permitAll()
                     .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest/sender-name")).permitAll()
+                    .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest/receiver-name")).permitAll()
                     .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/guest/collect")).permitAll()
                     .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/drafts")).permitAll()
                     .requestMatchers(mvc.pattern(HttpMethod.POST, "/api/orders/track")).permitAll()

@@ -280,6 +280,12 @@ public class OrderFacadeResource {
         return publicSenderLookupService.senderName(request != null ? request.get("phone") : null, clientIp(http));
     }
 
+    /** Public /tao-don: nhập SĐT người nhận → tên người nhận ở đơn gần nhất (giới hạn theo IP). */
+    @PostMapping("/guest/receiver-name")
+    public Map<String, Object> guestReceiverName(@RequestBody Map<String, String> request, jakarta.servlet.http.HttpServletRequest http) {
+        return publicSenderLookupService.receiverName(request != null ? request.get("phone") : null, clientIp(http));
+    }
+
     /** @deprecated Prefer POST /api/orders/guest — same behavior (CONFIRMED). Kept for old FE. */
     @PostMapping("/drafts")
     @ResponseStatus(HttpStatus.CREATED)

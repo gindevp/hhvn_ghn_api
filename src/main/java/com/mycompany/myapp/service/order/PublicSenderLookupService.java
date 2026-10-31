@@ -15,8 +15,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * Trang khách tự tạo đơn: khách nhập SĐT của mình → điền lại tên người gửi từ đơn gần nhất.
- * Chỉ trả tên người gửi (không địa chỉ, không người nhận) và giới hạn theo IP để khó dò tên chủ số.
+ * Trang khách tự tạo đơn: nhập SĐT → điền lại tên từ đơn gần nhất (người gửi hoặc người nhận).
+ * Chỉ trả tên (không địa chỉ) và giới hạn theo IP để khó dò tên chủ số.
  */
 @Service
 public class PublicSenderLookupService {
@@ -33,16 +33,31 @@ public class PublicSenderLookupService {
 
     @Transactional(readOnly = true)
     public Map<String, Object> senderName(String rawPhone, String ip) {
+        return lookupName(rawPhone, ip, true);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> receiverName(String rawPhone, String ip) {
+        return lookupName(rawPhone, ip, false);
+    }
+
+    private Map<String, Object> lookupName(String rawPhone, String ip, boolean sender) {
         String phone = normalizePhone(rawPhone);
         if (phone == null) {
             return Map.of("found", false);
         }
         throttle("ip:" + (ip == null ? "" : ip));
-        List<String> names = shipmentOrderRepository.findLatestSenderNames(phone, PageRequest.of(0, 1));
+        List<String> names = sender
+            ? shipmentOrderRepository.findLatestSenderNames(phone, PageRequest.of(0, 1))
+            : shipmentOrderRepository.findLatestReceiverNames(phone, PageRequest.of(0, 1));
         if (names.isEmpty()) {
             return Map.of("found", false);
         }
-        return Map.of("found", true, "name", names.get(0).trim());
+        String name = names.get(0) == null ? "" : names.get(0).trim();
+        if (name.isEmpty()) {
+            return Map.of("found", false);
+        }
+        return Map.of("found", true, "name", name);
     }
 
     /** {@code 0xxxxxxxxx} hoặc null; nhận cả +84 / 84 / có dấu cách, chấm. */

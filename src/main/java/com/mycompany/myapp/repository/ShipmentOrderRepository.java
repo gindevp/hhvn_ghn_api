@@ -193,6 +193,15 @@ public interface ShipmentOrderRepository extends JpaRepository<ShipmentOrder, Lo
     )
     List<String> findLatestSenderNames(@Param("phone") String phone, Pageable pageable);
 
+    @Query(
+        """
+        select o.receiverName from ShipmentOrder o
+        where o.receiverPhone = :phone and o.receiverName is not null and o.receiverName <> ''
+        order by o.id desc
+        """
+    )
+    List<String> findLatestReceiverNames(@Param("phone") String phone, Pageable pageable);
+
     /** Trang khách: đơn mình gửi, nhận hoặc tạo bằng tài khoản (web khách / app) — bỏ nháp, mới nhất trước. */
     @Query(
         """
