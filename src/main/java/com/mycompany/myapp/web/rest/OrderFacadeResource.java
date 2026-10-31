@@ -61,6 +61,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
@@ -646,6 +647,20 @@ public class OrderFacadeResource {
     public OrderDetailDTO forwardStage(@PathVariable String orderCode, @RequestBody(required = false) Map<String, String> body) {
         ForwardStage stage = parseEnum(ForwardStage.class, body != null ? body.get("forwardStage") : null, "forwardStage");
         return exceptionFacadeService.setForwardStage(orderCode, stage);
+    }
+
+    /**
+     * Admin: backfill thu đầu gửi cho đơn GUI_TRA tạo quầy / nhập kho gửi bị thiếu prepaid
+     * (paid=0 → book ship tính ứng đủ). Mặc định {@code dryRun=true}.
+     */
+    @PostMapping("/admin/backfill-sender-prepaid")
+    @PreAuthorize("hasAuthority('ROLE_ADMIN')")
+    public Map<String, Object> backfillSenderPrepaid(
+        @RequestParam(defaultValue = "true") boolean dryRun,
+        @RequestParam(defaultValue = "200") int limit,
+        @RequestParam(required = false) String orderCode
+    ) {
+        return orderFacadeService.backfillMissingSenderPrepaid(dryRun, limit, orderCode);
     }
 
     private static <E extends Enum<E>> E parseEnum(Class<E> type, String raw, String field) {

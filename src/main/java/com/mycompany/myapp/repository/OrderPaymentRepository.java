@@ -46,6 +46,8 @@ public interface OrderPaymentRepository extends JpaRepository<OrderPayment, Long
 
     List<OrderPayment> findByOrder_IdOrderByPaymentAtDesc(Long orderId);
 
+    boolean existsByOrder_IdAndNote(Long orderId, String note);
+
     /** Hàng: [orderId, paymentKind, note, sum(amount)]. */
     @Query(
         "select orderPayment.order.id, orderPayment.paymentKind, orderPayment.note, coalesce(sum(orderPayment.amount), 0) from OrderPayment orderPayment where orderPayment.order.id in :orderIds group by orderPayment.order.id, orderPayment.paymentKind, orderPayment.note"

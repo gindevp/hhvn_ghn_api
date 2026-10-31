@@ -48,12 +48,16 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
@@ -1073,6 +1077,10 @@ public class OrderFacadeService {
         order = shipmentOrderRepository.save(order);
         ensureLegs(order);
         appendEvent(order, "CONFIRM", "Xác nhận từ nháp", currentActor());
+        // Quầy xác nhận nháp = người gửi đang ở quầy → GUI_TRA ghi đã thu (cùng rule nhập kho gửi).
+        if (goodsAtSenderCounter(order)) {
+            collectSenderFareOnWarehouseIn(order);
+        }
         return toSummary(order);
     }
 
@@ -1138,6 +1146,10 @@ public class OrderFacadeService {
         order = shipmentOrderRepository.save(order);
         ensureLegs(order);
         appendEvent(order, "CREATE", "Tạo đơn nội bộ", currentActor());
+        // Tạo đơn quầy (không LTN chờ lấy) = đã nhận hàng + thu cước người gửi → GUI_TRA ghi đã thu.
+        if (goodsAtSenderCounter(order)) {
+            collectSenderFareOnWarehouseIn(order);
+        }
         return toSummary(order);
     }
 
@@ -2121,28 +2133,143 @@ public class OrderFacadeService {
      * (người thu = người nhập kho) cho phần cước còn thiếu, để shipper không thu lại người nhận.
      */
     public void collectSenderFareOnWarehouseIn(ShipmentOrder order) {
+        recordSenderPrepaid(order, false, null);
+    }
+
+    /**
+     * Backfill đơn cũ: GUI_TRA tạo/xác nhận quầy (hoặc đã nhập kho gửi) nhưng thiếu khoản thu đầu gửi
+     * → paid=0 khiến book ship tính ứng đủ cước.
+     * {@code dryRun=true} chỉ liệt kê; {@code orderCode} giới hạn 1 mã.
+     */
+    public Map<String, Object> backfillMissingSenderPrepaid(boolean dryRun, int limit, String orderCode) {
+        int cap = Math.max(1, Math.min(limit <= 0 ? 200 : limit, 1000));
+        List<ShipmentOrder> candidates;
+        if (orderCode != null && !orderCode.isBlank()) {
+            ShipmentOrder one = requireByCode(orderCode.trim());
+            candidates = List.of(one);
+        } else {
+            candidates = shipmentOrderRepository.findGuiTraDueLikelyMissingPrepaid(PageRequest.of(0, cap * 3));
+        }
+        List<Map<String, Object>> fixed = new ArrayList<>();
+        List<Map<String, Object>> skipped = new ArrayList<>();
+        int applied = 0;
+        for (ShipmentOrder order : candidates) {
+            if (applied >= cap) {
+                break;
+            }
+            String reason = missingSenderPrepaidSkipReason(order);
+            if (reason != null) {
+                skipped.add(Map.of("orderCode", order.getOrderCode(), "reason", reason));
+                continue;
+            }
+            BigDecimal due = OrderMoney.collectDue(order);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("orderCode", order.getOrderCode());
+            row.put("status", order.getStatus() != null ? order.getStatus().name() : null);
+            row.put("fareAmount", OrderMoney.nz(order.getFareAmount()));
+            row.put("paidAmount", OrderMoney.nz(order.getPaidAmount()));
+            row.put("due", due);
+            if (!dryRun) {
+                boolean ok = recordSenderPrepaid(order, true, "backfill thiếu thu tạo quầy");
+                row.put("applied", ok);
+                if (ok) {
+                    applied++;
+                    fixed.add(row);
+                } else {
+                    skipped.add(Map.of("orderCode", order.getOrderCode(), "reason", "record_failed"));
+                }
+            } else {
+                applied++;
+                fixed.add(row);
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("dryRun", dryRun);
+        out.put("limit", cap);
+        out.put("fixedCount", fixed.size());
+        out.put("skippedCount", skipped.size());
+        out.put("fixed", fixed);
+        out.put("skipped", skipped);
+        return out;
+    }
+
+    /** null = đủ điều kiện backfill prepaid. */
+    private String missingSenderPrepaidSkipReason(ShipmentOrder order) {
+        if (order == null || order.getOrderCode() == null) {
+            return "null";
+        }
+        if (order.getPaymentTerm() != PaymentTerm.GUI_TRA) {
+            return "not_gui_tra";
+        }
+        if (Boolean.TRUE.equals(order.getOnCredit())) {
+            return "on_credit";
+        }
+        if (order.getStatus() == OrderStatus.DRAFT || order.getStatus() == OrderStatus.CANCELLED) {
+            return "status";
+        }
+        if (Boolean.TRUE.equals(order.getHomePickup()) && order.getPickedUpAt() == null) {
+            return "home_pickup_pending";
+        }
+        if (OrderMoney.collectDue(order).signum() <= 0) {
+            return "no_due";
+        }
+        if (orderPaymentRepository != null && orderPaymentRepository.existsByOrder_IdAndNote(order.getId(), NOTE_SENDER_PREPAID)) {
+            return "already_prepaid_note";
+        }
+        boolean customerCreated =
+            order.getId() != null &&
+            orderEventRepository != null &&
+            orderEventRepository.existsByOrder_IdAndActionAndActorUsername(order.getId(), "CREATE", "customer");
+        boolean senderIntake =
+            order.getId() != null &&
+            orderEventRepository != null &&
+            orderEventRepository.existsByOrderIdAndUpperActionIn(
+                order.getId(),
+                List.of("WAREHOUSE_RECEIVE", "WH_IN", "CONFIRM", "CREATE")
+            );
+        if (customerCreated) {
+            boolean warehouseIn =
+                orderEventRepository.existsByOrderIdAndUpperActionIn(
+                    order.getId(),
+                    List.of("WAREHOUSE_RECEIVE", "WH_IN", "CONFIRM")
+                );
+            if (!warehouseIn) {
+                return "customer_not_warehouse_in";
+            }
+        } else if (!senderIntake) {
+            return "no_intake_event";
+        }
+        return null;
+    }
+
+    /**
+     * @param force bỏ chặn status CONFIRMED/WAITING + ngày thu đã chốt (dùng backfill đơn đã đi đường)
+     * @return true nếu đã ghi khoản thu
+     */
+    private boolean recordSenderPrepaid(ShipmentOrder order, boolean force, String eventSuffix) {
         if (orderPaymentRepository == null || order.getPaymentTerm() != PaymentTerm.GUI_TRA) {
-            return;
+            return false;
         }
-        if (order.getStatus() != OrderStatus.CONFIRMED && order.getStatus() != OrderStatus.WAITING) {
-            return;
+        if (!force && order.getStatus() != OrderStatus.CONFIRMED && order.getStatus() != OrderStatus.WAITING) {
+            return false;
         }
-        // Nhập kho ở VP trung chuyển không phải nhận hàng từ người gửi.
-        if (passedTransitHub(order)) {
-            return;
+        if (!force && passedTransitHub(order)) {
+            return false;
         }
         BigDecimal due = OrderMoney.collectDue(order);
         if (due.signum() <= 0) {
-            return;
+            return false;
         }
-        try {
-            dayClosureGuard.assertCollectionMutable(order);
-        } catch (RuntimeException closed) {
-            org.slf4j.LoggerFactory.getLogger(OrderFacadeService.class).warn(
-                "Skip sender prepaid for {}: collection day closed",
-                order.getOrderCode()
-            );
-            return;
+        if (!force) {
+            try {
+                dayClosureGuard.assertCollectionMutable(order);
+            } catch (RuntimeException closed) {
+                org.slf4j.LoggerFactory.getLogger(OrderFacadeService.class).warn(
+                    "Skip sender prepaid for {}: collection day closed",
+                    order.getOrderCode()
+                );
+                return false;
+            }
         }
         String actor = currentActor();
         com.mycompany.myapp.domain.OrderPayment payment = new com.mycompany.myapp.domain.OrderPayment();
@@ -2156,7 +2283,12 @@ public class OrderFacadeService {
         orderPaymentRepository.save(payment);
         order.setPaidAmount(OrderMoney.nz(order.getPaidAmount()).add(due));
         shipmentOrderRepository.save(order);
-        appendEvent(order, "PAYMENT", NOTE_SENDER_PREPAID + " · " + due.toPlainString() + "đ", actor);
+        String payDetail = NOTE_SENDER_PREPAID + " · " + due.toPlainString() + "đ";
+        if (eventSuffix != null && !eventSuffix.isBlank()) {
+            payDetail = payDetail + " · " + eventSuffix.trim();
+        }
+        appendEvent(order, "PAYMENT", payDetail, actor);
+        return true;
     }
 
     /**

@@ -251,4 +251,24 @@ public interface ShipmentOrderRepository extends JpaRepository<ShipmentOrder, Lo
         """
     )
     List<Long> findIdsAccruingStorageFee();
+
+    /**
+     * Ứng viên backfill thu đầu gửi: GUI_TRA còn thiếu cước, không công nợ, không nháp/huỷ,
+     * không LTN đang chờ lấy (đã lấy hoặc không LTN).
+     */
+    @Query(
+        """
+        select o from ShipmentOrder o
+        where o.paymentTerm = com.mycompany.myapp.domain.enumeration.PaymentTerm.GUI_TRA
+        and (o.onCredit is null or o.onCredit = false)
+        and coalesce(o.fareAmount, 0) > coalesce(o.paidAmount, 0)
+        and o.status not in (
+            com.mycompany.myapp.domain.enumeration.OrderStatus.DRAFT,
+            com.mycompany.myapp.domain.enumeration.OrderStatus.CANCELLED
+        )
+        and (o.homePickup is null or o.homePickup = false or o.pickedUpAt is not null)
+        order by o.id desc
+        """
+    )
+    List<ShipmentOrder> findGuiTraDueLikelyMissingPrepaid(Pageable pageable);
 }

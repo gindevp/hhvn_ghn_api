@@ -1082,7 +1082,7 @@ public class FinanceFacadeService {
 
     /**
      * Tự xác nhận phiếu khi thu hộ OnePay báo đủ tiền (IPN) — không cần ảnh chứng từ / KT bấm xác nhận.
-     * Idempotent nếu phiếu đã confirmed.
+     * Ghi lịch sử từng đơn (mã GD / số tiền). Idempotent nếu phiếu đã confirmed.
      */
     public void confirmReceiptByCollection(String receiptCode, String note) {
         if (receiptCode == null || receiptCode.isBlank()) {
@@ -1099,10 +1099,39 @@ public class FinanceFacadeService {
         if (n.length() > 1000) {
             n = n.substring(0, 1000);
         }
-        receipt.setConfirmedAt(Instant.now());
+        Instant now = Instant.now();
+        receipt.setConfirmedAt(now);
         receipt.setConfirmedByUsername("ONEPAY");
         receipt.setConfirmNote(n);
         receiptRepository.save(receipt);
+        List<ReceiptOrderLine> lines = receiptOrderLineRepository.findByReceipt_Id(receipt.getId());
+        Map<Long, BigDecimal> byOrder = new HashMap<>();
+        Map<Long, ShipmentOrder> orderById = new HashMap<>();
+        for (ReceiptOrderLine line : lines) {
+            if (line.getOrder() == null || line.getOrder().getId() == null) {
+                continue;
+            }
+            Long oid = line.getOrder().getId();
+            byOrder.merge(oid, OrderMoney.nz(line.getAmountCollected()), BigDecimal::add);
+            orderById.putIfAbsent(oid, line.getOrder());
+        }
+        for (Map.Entry<Long, BigDecimal> e : byOrder.entrySet()) {
+            ShipmentOrder order = orderById.get(e.getKey());
+            appendReceiptEvent(
+                order,
+                "RECEIPT_CONFIRM",
+                receipt.getReceiptCode() + " · " + money(e.getValue()) + " · " + n,
+                ONEPAY_ACTOR,
+                now
+            );
+            appendReceiptEvent(
+                order,
+                "ONEPAY_PAID",
+                "Đã nhận tiền CK OnePay · " + money(e.getValue()) + " · " + n,
+                ONEPAY_ACTOR,
+                now
+            );
+        }
         auditRecorder.record(
             "RECEIPT_CONFIRM_ONEPAY",
             AUDIT_RECEIPT,
@@ -1112,7 +1141,7 @@ public class FinanceFacadeService {
     }
 
     public static final String ONEPAY_PAYER = "Thu hộ OnePay";
-    private static final String ONEPAY_ACTOR = "ONEPAY";
+    public static final String ONEPAY_ACTOR = "ONEPAY";
 
     /**
      * Khách chuyển khoản OnePay đủ tiền đơn: lập luôn phiếu thu đã xác nhận phần VP gửi (người nộp {@link #ONEPAY_PAYER}),
@@ -1143,7 +1172,21 @@ public class FinanceFacadeService {
         appendReceiptEvent(
             order,
             "RECEIPT_CREATE",
-            receipt.getReceiptCode() + " · " + money(amount) + " · " + ONEPAY_PAYER,
+            receipt.getReceiptCode() + " · " + money(amount) + " · " + note,
+            ONEPAY_ACTOR,
+            now
+        );
+        appendReceiptEvent(
+            order,
+            "ONEPAY_PAID",
+            "Đã nhận tiền CK OnePay · " + note,
+            ONEPAY_ACTOR,
+            now
+        );
+        appendReceiptEvent(
+            order,
+            "RECEIPT_CONFIRM",
+            receipt.getReceiptCode() + " · " + money(amount) + " · đã thu · " + note,
             ONEPAY_ACTOR,
             now
         );
@@ -1692,7 +1735,13 @@ public class FinanceFacadeService {
         return resolveSenderWhActor(order);
     }
 
-    /** Người nhập kho gửi (WAREHOUSE_RECEIVE); bỏ qua nhập kho → người quét lên xe đầu tiên; rồi tạo đơn / lấy hàng. */
+    /**
+     * Chủ nợ phía gửi khi chưa có payment collector:
+     * 1) NV nhập kho gửi / xác nhận nháp;
+     * 2) NV tạo đơn nội bộ (quầy) — chịu cước GUI_TRA tại quầy, không đẩy sang người gán/quét lên xe;
+     * 3) Đơn khách / không có actor tạo: người quét lên xe / gán xe đầu tiên;
+     * 4) fallback pickup / CREATE qua {@link #resolveDebtOwner}.
+     */
     private String resolveSenderWhActor(ShipmentOrder order) {
         if (order.getId() != null) {
             List<OrderEvent> events = orderEventRepository.findByOrder_IdOrderByEventAtAsc(order.getId());
@@ -1706,8 +1755,19 @@ public class FinanceFacadeService {
                     }
                 }
             }
+            // Tạo đơn nội bộ: người tạo = người thu tại quầy. Không gán nợ cho ASSIGN_TRIP / SCAN_OUT.
             for (OrderEvent event : events) {
-                if ("SCAN_OUT".equalsIgnoreCase(event.getAction() == null ? "" : event.getAction().trim())) {
+                String action = event.getAction() == null ? "" : event.getAction().trim();
+                if ("CREATE".equalsIgnoreCase(action) || "CREATED".equalsIgnoreCase(action)) {
+                    String actor = staffActor(event);
+                    if (actor != null) {
+                        return actor;
+                    }
+                }
+            }
+            for (OrderEvent event : events) {
+                String action = event.getAction() == null ? "" : event.getAction().trim().toUpperCase();
+                if ("SCAN_OUT".equals(action) || "ASSIGN_TRIP".equals(action)) {
                     String actor = staffActor(event);
                     if (actor != null) {
                         return actor;
