@@ -243,6 +243,8 @@ public class StaffDepositService {
         List<MyReceipt> out = new ArrayList<>();
         for (ReceiptListRow r : rows) {
             Instant receiptDate = receiptDate(orderIdsByReceipt.getOrDefault(r.id(), Set.of()), paidAt, r.createdAt());
+            OnePayInvoice inv = findReceiptInvoice(r.receiptCode());
+            String paidTransId = inv != null && notBlank(inv.getPaidTransId()) ? inv.getPaidTransId().trim() : null;
             out.add(
                 new MyReceipt(
                     r.receiptCode(),
@@ -254,7 +256,9 @@ public class StaffDepositService {
                     r.confirmedByUsername(),
                     Boolean.TRUE.equals(r.hasTransferProof()),
                     Boolean.TRUE.equals(r.hasConfirmProof()) || r.confirmedAt() != null,
-                    resolveTransfer(r.receiptCode(), r.totalAmount(), r.officeCode(), receiptDate, cfg, me, login, officeIds, false)
+                    resolveTransfer(r.receiptCode(), r.totalAmount(), r.officeCode(), receiptDate, cfg, me, login, officeIds, false),
+                    null,
+                    paidTransId
                 )
             );
         }
@@ -389,7 +393,16 @@ public class StaffDepositService {
         } else {
             expiresAt = ZonedDateTime.of(LocalDate.ofInstant(created, VN), LocalTime.of(23, 59, 59), VN).toInstant();
         }
-        return new ReceiptPayQr(r.getReceiptCode(), r.getTotalAmount(), expiresAt, r.getConfirmedAt(), transfer);
+        String paidTransId = inv != null && notBlank(inv.getPaidTransId()) ? inv.getPaidTransId().trim() : null;
+        return new ReceiptPayQr(
+            r.getReceiptCode(),
+            r.getTotalAmount(),
+            expiresAt,
+            r.getConfirmedAt(),
+            transfer,
+            r.getConfirmNote(),
+            paidTransId
+        );
     }
 
     /** Nội dung chuyển khoản từng phiếu (mã phiếu → nội dung) theo mẫu cấu hình, như QR trên app Nộp tiền của người nộp. */
@@ -458,6 +471,8 @@ public class StaffDepositService {
             }
         }
         Instant receiptDate = receiptDate(orderIds, financeFacadeService.customerPaidAtByOrderIds(orderIds), r.getCreatedAt());
+        OnePayInvoice inv = findReceiptInvoice(r.getReceiptCode());
+        String paidTransId = inv != null && notBlank(inv.getPaidTransId()) ? inv.getPaidTransId().trim() : null;
         return new MyReceipt(
             r.getReceiptCode(),
             r.getTotalAmount(),
@@ -478,7 +493,9 @@ public class StaffDepositService {
                 currentLogin(),
                 new HashMap<>(),
                 ensureCollectVa
-            )
+            ),
+            r.getConfirmNote(),
+            paidTransId
         );
     }
 
@@ -514,8 +531,10 @@ public class StaffDepositService {
     }
 
     /**
-     * Ưu tiên VA OnePay khi bật thu hộ phiếu; không thì VietQR TK nộp tiền.
+     * Ưu tiên VA OnePay khi bật thu hộ phiếu; tắt thu hộ → VietQR TK nộp tiền (Bảo trì).
      * {@code ensureVa}: tạo VA mới nếu chưa có / hết hạn (sau tạo phiếu hoặc mở QR).
+     * <p>Khi đang bật thu hộ: không bao giờ fallback sang QR TK nộp tiền — tránh app hiện nhầm QR
+     * rồi poll mới đổi sang VA (NV chuyển tiền nhầm).
      */
     private TransferInfo resolveTransfer(
         String receiptCode,
@@ -528,11 +547,14 @@ public class StaffDepositService {
         Map<String, String> officeIds,
         boolean ensureVa
     ) {
+        TransferInfo deposit = transferInfo(cfg, staff, login, receiptCode, officeCode, at, amount, officeIds);
         if (receiptCollectOn() && amount != null && amount.signum() > 0) {
             OnePayInvoice inv = findReceiptInvoice(receiptCode);
             if (!invoiceUsable(inv) && ensureVa) {
                 try {
                     inv = onePayAdminService.createForReceipt(receiptCode, amount);
+                } catch (ResponseStatusException ex) {
+                    throw ex;
                 } catch (RuntimeException ex) {
                     throw new ResponseStatusException(
                         HttpStatus.BAD_GATEWAY,
@@ -543,9 +565,13 @@ public class StaffDepositService {
             if (invoiceUsable(inv)) {
                 return fromOnePayInvoice(inv, receiptCode);
             }
+            if (ensureVa) {
+                throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Không tạo được QR thu hộ phiếu");
+            }
+            // Danh sách phiếu: chưa có VA thì không trả QR TK nộp (tránh UI mở nhầm).
             return null;
         }
-        return transferInfo(cfg, staff, login, receiptCode, officeCode, at, amount, officeIds);
+        return deposit;
     }
 
     private TransferInfo fromOnePayInvoice(OnePayInvoice inv, String receiptCode) {
@@ -728,8 +754,19 @@ public class StaffDepositService {
         String qrData
     ) {}
 
-    /** QR thu phiếu trên web — transfer null nếu chưa cấu hình TK / chưa bật thu hộ. */
-    public record ReceiptPayQr(String receiptCode, BigDecimal amount, Instant expiresAt, Instant confirmedAt, TransferInfo transfer) {}
+    /**
+     * QR thu phiếu trên web — transfer null nếu chưa cấu hình TK / chưa bật thu hộ.
+     * {@code confirmNote}/{@code paidTransId} khi OnePay/KT đã xác nhận đã thu.
+     */
+    public record ReceiptPayQr(
+        String receiptCode,
+        BigDecimal amount,
+        Instant expiresAt,
+        Instant confirmedAt,
+        TransferInfo transfer,
+        String confirmNote,
+        String paidTransId
+    ) {}
 
     public record MyReceipt(
         String receiptCode,
@@ -743,7 +780,9 @@ public class StaffDepositService {
         boolean hasTransferProof,
         boolean hasProof,
         /** null khi chưa cấu hình tài khoản nhận tiền / chưa có VA thu hộ */
-        TransferInfo transfer
+        TransferInfo transfer,
+        String confirmNote,
+        String paidTransId
     ) {}
 
     public record DepositAccount(String bankBin, String bankName, String accountNo, String accountName, String contentTemplate) {}
