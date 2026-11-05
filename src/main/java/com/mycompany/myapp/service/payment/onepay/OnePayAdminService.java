@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -55,6 +56,8 @@ public class OnePayAdminService {
     private final OnePayClient client;
     private final ObjectMapper objectMapper;
     private final AuditRecorder auditRecorder;
+    private OnePayOrderPaidHandler orderPaidHandler;
+    private OnePayReceiptPaidHandler receiptPaidHandler;
 
     public OnePayAdminService(
         OnePayConfigRepository configRepository,
@@ -72,6 +75,16 @@ public class OnePayAdminService {
         this.client = client;
         this.objectMapper = objectMapper;
         this.auditRecorder = auditRecorder;
+    }
+
+    @Autowired(required = false)
+    public void setOrderPaidHandler(OnePayOrderPaidHandler orderPaidHandler) {
+        this.orderPaidHandler = orderPaidHandler;
+    }
+
+    @Autowired(required = false)
+    public void setReceiptPaidHandler(OnePayReceiptPaidHandler receiptPaidHandler) {
+        this.receiptPaidHandler = receiptPaidHandler;
     }
 
     // ---------------------------------------------------------------- cấu hình
@@ -588,7 +601,10 @@ public class OnePayAdminService {
         }
     }
 
-    /** Tra trạng thái trên OnePay — dùng khi chưa nhận IPN (VD OnePay chưa cấu hình URL IPN). */
+    /**
+     * Tra trạng thái trên OnePay — dùng khi chưa nhận IPN (URL IPN sai / mất callback).
+     * Nếu OnePay báo đã paid mà CPN còn UNPAID → ghi nhận như IPN (đã thu + log đơn / phiếu).
+     */
     public InvoiceView refreshInvoice(Long id) {
         OnePayInvoice inv = find(id);
         OnePayConfig c = requireCredentials(false);
@@ -610,19 +626,81 @@ public class OnePayAdminService {
         if (inv.getOnepayInvoiceId() == null) {
             inv.setOnepayInvoiceId(text(r.json(), "id"));
         }
-        if ("paid".equalsIgnoreCase(remote) && OnePayInvoice.STATE_UNPAID.equals(inv.getState())) {
+        boolean applyPaid = false;
+        BigDecimal paidAmount = null;
+        String transId = null;
+        // UNPAID hoặc EXPIRED: OnePay đã paid (IPN trễ / đóng VA trước callback) vẫn ghi nhận thu.
+        String localBefore = inv.getState();
+        boolean canApplyPaid =
+            OnePayInvoice.STATE_UNPAID.equals(localBefore) || OnePayInvoice.STATE_EXPIRED.equals(localBefore);
+        if ("paid".equalsIgnoreCase(remote) && canApplyPaid) {
+            paidAmount = parseAmount(r.json(), inv.getAmount());
+            transId = firstNonBlank(
+                text(r.json(), "transaction_id"),
+                text(r.json(), "trans_id"),
+                text(r.json().path("transaction"), "id"),
+                "SYNC-" + inv.getId()
+            );
             inv.setState(OnePayInvoice.STATE_PAID);
-            if (inv.getPaidAt() == null) {
-                inv.setPaidAt(Instant.now());
-            }
-            if (inv.getPaidAmount() == null) {
-                inv.setLastError("OnePay báo đã thanh toán nhưng CPN chưa nhận IPN — kiểm tra URL IPN");
-            }
+            inv.setPaidAt(Instant.now());
+            inv.setPaidAmount(paidAmount);
+            inv.setPaidTransId(transId);
+            inv.setLastError(
+                OnePayInvoice.STATE_EXPIRED.equals(localBefore)
+                    ? "Đồng bộ OnePay: đã thu sau khi CPN đánh hết hạn (IPN trễ / VA khoá)"
+                    : "Đồng bộ tay từ OnePay (chưa nhận IPN) — kiểm tra URL IPN"
+            );
+            applyPaid = true;
         } else if ("expired".equalsIgnoreCase(remote) && OnePayInvoice.STATE_UNPAID.equals(inv.getState())) {
             inv.setState(OnePayInvoice.STATE_EXPIRED);
         }
         inv.setUpdatedAt(Instant.now());
-        return toView(invoiceRepository.save(inv));
+        inv = invoiceRepository.save(inv);
+        if (applyPaid && paidAmount != null && paidAmount.signum() > 0) {
+            applyPaidHandlers(inv, paidAmount, transId, c);
+        }
+        return toView(inv);
+    }
+
+    private void applyPaidHandlers(OnePayInvoice inv, BigDecimal amount, String transId, OnePayConfig cfg) {
+        if (inv.getOrderCode() == null || inv.getOrderCode().isBlank()) {
+            return;
+        }
+        boolean sandbox = !OnePayConfig.ENV_PRODUCTION.equals(cfg.getEnvironment());
+        try {
+            if (OnePayInvoice.PURPOSE_ORDER.equals(inv.getPurpose()) && orderPaidHandler != null) {
+                orderPaidHandler.paid(inv.getOrderCode(), amount, transId, sandbox);
+            } else if (OnePayInvoice.PURPOSE_RECEIPT.equals(inv.getPurpose()) && receiptPaidHandler != null) {
+                receiptPaidHandler.paid(inv.getOrderCode(), amount, transId);
+            }
+        } catch (RuntimeException ex) {
+            inv.setLastError(cut("Đồng bộ OnePay OK nhưng ghi nhận CPN lỗi: " + ex.getMessage(), 255));
+            invoiceRepository.save(inv);
+        }
+    }
+
+    private static BigDecimal parseAmount(com.fasterxml.jackson.databind.JsonNode json, BigDecimal fallback) {
+        String raw = firstNonBlank(text(json, "amount"), text(json.path("invoice"), "amount"));
+        if (raw != null) {
+            try {
+                return new BigDecimal(raw.trim());
+            } catch (NumberFormatException ignored) {
+                /* dùng fallback */
+            }
+        }
+        return fallback != null ? fallback : BigDecimal.ZERO;
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String v : values) {
+            if (notBlank(v)) {
+                return v.trim();
+            }
+        }
+        return null;
     }
 
     /** Khoá / mở tài khoản ảo bên OnePay. Khoá rồi khách không chuyển tiền vào được nữa. */

@@ -372,19 +372,28 @@ public class OrderFacadeService {
             spec = spec.and((root, q, cb) -> cb.equal(receiverOfficePath(root, cb), receiver));
         }
         if (keyword != null && !keyword.isBlank()) {
-            String like = "%" + keyword.trim().toLowerCase() + "%";
+            String kw = keyword.trim().toLowerCase();
+            String like = "%" + kw + "%";
+            // "0t12" → cũng tìm "%t12%" (mã đơn kiểu …01T12… không chứa chuỗi "0t12" liền nhau)
+            String stripped = kw.replaceFirst("^0+", "");
+            String likeStrip =
+                stripped.length() >= 3 && !stripped.equals(kw) ? "%" + stripped + "%" : null;
             String phone = phoneSearchDigits(keyword);
             String phoneLike = phone != null ? "%" + phone + "%" : like;
-            spec = spec.and((root, q, cb) ->
-                cb.or(
-                    cb.like(cb.lower(root.get("orderCode")), like),
-                    cb.like(cb.lower(root.get("draftCode")), like),
-                    cb.like(cb.lower(root.get("senderPhone")), phoneLike),
-                    cb.like(cb.lower(root.get("receiverPhone")), phoneLike),
-                    cb.like(cb.lower(root.get("receiverName")), like),
-                    cb.like(cb.lower(cb.coalesce(root.get("senderName"), "")), like)
-                )
-            );
+            spec = spec.and((root, q, cb) -> {
+                var preds = new java.util.ArrayList<jakarta.persistence.criteria.Predicate>();
+                preds.add(cb.like(cb.lower(root.get("orderCode")), like));
+                preds.add(cb.like(cb.lower(root.get("draftCode")), like));
+                if (likeStrip != null) {
+                    preds.add(cb.like(cb.lower(root.get("orderCode")), likeStrip));
+                    preds.add(cb.like(cb.lower(root.get("draftCode")), likeStrip));
+                }
+                preds.add(cb.like(cb.lower(root.get("senderPhone")), phoneLike));
+                preds.add(cb.like(cb.lower(root.get("receiverPhone")), phoneLike));
+                preds.add(cb.like(cb.lower(root.get("receiverName")), like));
+                preds.add(cb.like(cb.lower(cb.coalesce(root.get("senderName"), "")), like));
+                return cb.or(preds.toArray(jakarta.persistence.criteria.Predicate[]::new));
+            });
         }
         String phoneAffix = phoneAffixDigits(ex.phoneEndsWith());
         if (phoneAffix != null) {
