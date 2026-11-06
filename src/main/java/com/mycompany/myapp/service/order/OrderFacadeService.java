@@ -1512,9 +1512,25 @@ public class OrderFacadeService {
         }
         shipmentOrderRepository.save(order);
         syncCollectVa(order);
-        appendEvent(order, "WAREHOUSE_RECEIVE", "Nhập kho gửi", currentActor());
+        appendWarehouseReceiveIfMissing(order);
         collectSenderFareOnWarehouseIn(order);
         return getByCode(order.getOrderCode());
+    }
+
+    /** Ghi WAREHOUSE_RECEIVE nếu chưa có — dùng khi forward-stage=WH_IN không qua {@link #warehouseReceive}. */
+    public void appendWarehouseReceiveIfMissing(ShipmentOrder order) {
+        if (order == null || order.getId() == null || orderEventRepository == null) {
+            return;
+        }
+        if (
+            orderEventRepository.existsByOrderIdAndUpperActionIn(
+                order.getId(),
+                List.of("WAREHOUSE_RECEIVE", "WH_IN")
+            )
+        ) {
+            return;
+        }
+        appendEvent(order, "WAREHOUSE_RECEIVE", "Nhập kho gửi", resolvePrepaidCollector(order));
     }
 
     public OrderDetailDTO advanceLeg(String code) {
@@ -2295,7 +2311,7 @@ public class OrderFacadeService {
                 return false;
             }
         }
-        String actor = currentActor();
+        String actor = resolvePrepaidCollector(order);
         com.mycompany.myapp.domain.OrderPayment payment = new com.mycompany.myapp.domain.OrderPayment();
         payment.setPaymentAt(Instant.now());
         payment.setAmount(due);
@@ -3392,5 +3408,143 @@ public class OrderFacadeService {
 
     private static String currentActor() {
         return SecurityUtils.getCurrentUserLogin().orElse("system");
+    }
+
+    /**
+     * Admin: sửa collector/actor ảo (anonymousUser) trên khoản thu đầu gửi + event PAYMENT/WAREHOUSE_RECEIVE.
+     * Gán lại theo NV lấy hàng / nhập kho thật — hết nợ oan về tổng đài tạo đơn.
+     */
+    public Map<String, Object> repairSyntheticPrepaidActors(String orderCode, boolean dryRun) {
+        ShipmentOrder order = requireByCode(orderCode.trim());
+        String target = resolveHistoricalPrepaidCollector(order);
+        List<Map<String, Object>> changed = new ArrayList<>();
+        if (orderPaymentRepository != null) {
+            for (com.mycompany.myapp.domain.OrderPayment p : orderPaymentRepository.findByOrder_IdOrderByPaymentAtDesc(order.getId())) {
+                if (!SecurityUtils.isSyntheticLogin(p.getCollectorUsername())) {
+                    continue;
+                }
+                String note = p.getNote() == null ? "" : p.getNote();
+                if (
+                    !note.contains("Thu đầu gửi") &&
+                    p.getPaymentKind() != com.mycompany.myapp.domain.enumeration.PaymentKind.TRUOC
+                ) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("type", "payment");
+                row.put("id", p.getId());
+                row.put("from", p.getCollectorUsername());
+                row.put("to", target);
+                if (!dryRun && !SecurityUtils.isSyntheticLogin(target)) {
+                    p.setCollectorUsername(target);
+                    orderPaymentRepository.save(p);
+                }
+                changed.add(row);
+            }
+        }
+        if (orderEventRepository != null) {
+            for (OrderEvent e : orderEventRepository.findByOrder_IdOrderByEventAtAsc(order.getId())) {
+                if (!SecurityUtils.isSyntheticLogin(e.getActorUsername())) {
+                    continue;
+                }
+                String action = e.getAction() == null ? "" : e.getAction().trim().toUpperCase();
+                if (
+                    !"PAYMENT".equals(action) &&
+                    !"WAREHOUSE_RECEIVE".equals(action) &&
+                    !"WH_IN".equals(action)
+                ) {
+                    continue;
+                }
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("type", "event");
+                row.put("id", e.getId());
+                row.put("action", e.getAction());
+                row.put("from", e.getActorUsername());
+                row.put("to", target);
+                if (!dryRun && !SecurityUtils.isSyntheticLogin(target)) {
+                    e.setActorUsername(target);
+                    orderEventRepository.save(e);
+                }
+                changed.add(row);
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("orderCode", order.getOrderCode());
+        out.put("dryRun", dryRun);
+        out.put("targetActor", target);
+        out.put("changedCount", changed.size());
+        out.put("changed", changed);
+        return out;
+    }
+
+    /**
+     * Người thu đầu gửi trên payment:
+     * - LTN: ưu tiên người book ship (AHAMOVE_BOOK / GRAB_BOOK) — nợ phiếu thu theo người book;
+     * - không thì NV đăng nhập; không ghi anonymousUser.
+     */
+    private String resolvePrepaidCollector(ShipmentOrder order) {
+        if (Boolean.TRUE.equals(order.getHomePickup())) {
+            String booker = latestBookShipActor(order);
+            if (booker != null) {
+                return booker;
+            }
+        }
+        String current = currentActor();
+        if (!SecurityUtils.isSyntheticLogin(current)) {
+            return current.trim();
+        }
+        return resolveHistoricalPrepaidCollector(order);
+    }
+
+    private String latestBookShipActor(ShipmentOrder order) {
+        if (order.getId() == null || orderEventRepository == null) {
+            return null;
+        }
+        List<OrderEvent> events = orderEventRepository.findByOrder_IdOrderByEventAtAsc(order.getId());
+        for (int i = events.size() - 1; i >= 0; i--) {
+            OrderEvent event = events.get(i);
+            String action = event.getAction() == null ? "" : event.getAction().trim().toUpperCase();
+            if (!"AHAMOVE_BOOK".equals(action) && !"GRAB_BOOK".equals(action)) {
+                continue;
+            }
+            String actor = event.getActorUsername();
+            if (actor != null && !SecurityUtils.isSyntheticLogin(actor)) {
+                return actor.trim();
+            }
+        }
+        return null;
+    }
+
+    /** NV thật từ pickup / event kho-lấy — bỏ qua CREATE tổng đài. */
+    private String resolveHistoricalPrepaidCollector(ShipmentOrder order) {
+        String booker = latestBookShipActor(order);
+        if (booker != null) {
+            return booker;
+        }
+        if (order.getPickupStaffUsername() != null && !SecurityUtils.isSyntheticLogin(order.getPickupStaffUsername())) {
+            return order.getPickupStaffUsername().trim();
+        }
+        if (order.getId() != null && orderEventRepository != null) {
+            List<OrderEvent> events = orderEventRepository.findByOrder_IdOrderByEventAtAsc(order.getId());
+            for (int i = events.size() - 1; i >= 0; i--) {
+                OrderEvent event = events.get(i);
+                String action = event.getAction() == null ? "" : event.getAction().trim().toUpperCase();
+                if (
+                    !"WAREHOUSE_RECEIVE".equals(action) &&
+                    !"WH_IN".equals(action) &&
+                    !"CONFIRM".equals(action) &&
+                    !"PICKUP_START".equals(action) &&
+                    !"PICKUP_STARTED".equals(action) &&
+                    !"PICKUP_RECEIVED".equals(action)
+                ) {
+                    continue;
+                }
+                String actor = event.getActorUsername();
+                if (actor != null && !SecurityUtils.isSyntheticLogin(actor)) {
+                    return actor.trim();
+                }
+            }
+        }
+        return "system";
     }
 }

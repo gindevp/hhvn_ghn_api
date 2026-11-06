@@ -64,6 +64,19 @@ class SecurityUtilsUnitTest {
     }
 
     @Test
+    void testAnonymousUserPrincipalIsNotCurrentLogin() {
+        SecurityContext securityContext = SecurityContextHolder.createEmptyContext();
+        Collection<GrantedAuthority> authorities = new ArrayList<>();
+        authorities.add(new SimpleGrantedAuthority(AuthoritiesConstants.ANONYMOUS));
+        securityContext.setAuthentication(
+            new UsernamePasswordAuthenticationToken("anonymousUser", "anonymousUser", authorities)
+        );
+        SecurityContextHolder.setContext(securityContext);
+        assertThat(SecurityUtils.getCurrentUserLogin()).isEmpty();
+        assertThat(SecurityUtils.isSyntheticLogin("anonymousUser")).isTrue();
+    }
+
+    @Test
     void testHasCurrentUserThisAuthority() {
         SecurityContext securityContext = SecurityContextHolder.createEmptyContext();
         Collection<GrantedAuthority> authorities = new ArrayList<>();

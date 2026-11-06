@@ -669,6 +669,18 @@ public class OrderFacadeResource {
         return orderFacadeService.backfillMissingSenderPrepaid(dryRun, limit, orderCode);
     }
 
+    /**
+     * Admin: sửa collector/actor anonymousUser trên thu đầu gửi + event nhập kho gửi (vd. đơn LTN q99e).
+     */
+    @PostMapping("/admin/repair-synthetic-prepaid")
+    @PreAuthorize("hasAuthority('ROLE_ADMIN')")
+    public Map<String, Object> repairSyntheticPrepaid(
+        @RequestParam String orderCode,
+        @RequestParam(defaultValue = "true") boolean dryRun
+    ) {
+        return orderFacadeService.repairSyntheticPrepaidActors(orderCode, dryRun);
+    }
+
     private static <E extends Enum<E>> E parseEnum(Class<E> type, String raw, String field) {
         if (raw == null || raw.isBlank()) {
             throw new BadRequestAlertException(field + " is required", "order", "invalid" + capitalize(field));

@@ -153,6 +153,31 @@ class FinanceFacadeServiceCandidateOwnerTest {
     }
 
     @Test
+    void homePickup_anonymousPrepaid_ownerIsBookShipStaffNotTongDaiCreator() {
+        order.setHomePickup(true);
+        order.setForwardStage(ForwardStage.WH_IN);
+        order.setStatus(OrderStatus.CONFIRMED);
+        order.setPaidAmount(new BigDecimal("30000"));
+        OrderPayment prepaid = new OrderPayment();
+        prepaid.setAmount(new BigDecimal("30000"));
+        prepaid.setPaymentKind(PaymentKind.TRUOC);
+        prepaid.setNote("Thu đầu gửi (người gửi thanh toán)");
+        prepaid.setCollectorUsername("anonymousUser");
+        prepaid.setPaymentAt(Instant.parse("2026-11-06T08:00:00Z"));
+        when(orderPaymentRepository.findByOrder_IdOrderByPaymentAtDesc(7L)).thenReturn(List.of(prepaid));
+        when(orderEventRepository.findByOrder_IdOrderByEventAtAsc(7L)).thenReturn(
+            List.of(
+                event("CREATE", "tongdai01"),
+                event("AHAMOVE_BOOK", "dieuphoi01"),
+                event("WAREHOUSE_RECEIVE", "anonymousUser"),
+                event("PAYMENT", "anonymousUser")
+            )
+        );
+
+        assertThat(senderOwner()).isEqualTo("dieuphoi01");
+    }
+
+    @Test
     void ahamoveAdvance_ownerIsCollectorNotAnonymousPod() {
         order.setStatus(OrderStatus.DELIVERED);
         order.setPaidAmount(new BigDecimal("125000"));

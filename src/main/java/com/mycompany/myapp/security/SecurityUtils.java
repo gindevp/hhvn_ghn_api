@@ -27,6 +27,8 @@ public final class SecurityUtils {
 
     /**
      * Get the login of the current user.
+     * Anonymous / synthetic principals ({@code anonymousUser}, {@code system}, {@code customer}) → empty
+     * so business code falls back to {@code system} or a real staff actor — never ghi nợ / thu tiền cho user ảo.
      *
      * @return the login of the current user.
      */
@@ -35,17 +37,47 @@ public final class SecurityUtils {
         return Optional.ofNullable(extractPrincipal(securityContext.getAuthentication()));
     }
 
+    /** Actor ảo (Spring anonymous / job / khách) — không phải NV thật. */
+    public static boolean isSyntheticLogin(String login) {
+        if (login == null || login.isBlank()) {
+            return true;
+        }
+        String a = login.trim();
+        return (
+            "anonymousUser".equalsIgnoreCase(a) ||
+            "anonymous".equalsIgnoreCase(a) ||
+            "system".equalsIgnoreCase(a) ||
+            "customer".equalsIgnoreCase(a)
+        );
+    }
+
     private static String extractPrincipal(Authentication authentication) {
         if (authentication == null) {
             return null;
-        } else if (authentication.getPrincipal() instanceof UserDetails springSecurityUser) {
-            return springSecurityUser.getUsername();
-        } else if (authentication.getPrincipal() instanceof Jwt jwt) {
-            return jwt.getSubject();
-        } else if (authentication.getPrincipal() instanceof String s) {
-            return s;
         }
-        return null;
+        // AnonymousAuthenticationFilter: isAuthenticated()=true nhưng principal = "anonymousUser".
+        if (getAuthorities(authentication).anyMatch(AuthoritiesConstants.ANONYMOUS::equals)) {
+            return null;
+        }
+        String principal;
+        if (authentication.getPrincipal() instanceof UserDetails springSecurityUser) {
+            principal = springSecurityUser.getUsername();
+        } else if (authentication.getPrincipal() instanceof Jwt jwt) {
+            principal = jwt.getSubject();
+        } else if (authentication.getPrincipal() instanceof String s) {
+            principal = s;
+        } else {
+            return null;
+        }
+        if (principal == null || principal.isBlank()) {
+            return null;
+        }
+        String trimmed = principal.trim();
+        // Chỉ bỏ anonymous* khỏi login hiện tại — "system"/"customer" vẫn trả về nếu JWT subject thật là vậy (hiếm).
+        if ("anonymousUser".equalsIgnoreCase(trimmed) || "anonymous".equalsIgnoreCase(trimmed)) {
+            return null;
+        }
+        return trimmed;
     }
 
     /**

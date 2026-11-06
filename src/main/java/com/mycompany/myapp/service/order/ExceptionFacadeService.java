@@ -883,6 +883,8 @@ public class ExceptionFacadeService {
         shipmentOrderRepository.save(order);
         orderFacadeService.syncCollectVa(order);
         if (stage == ForwardStage.WH_IN) {
+            // Ghi mốc nhập kho gửi (actor = NV đang đăng nhập) trước khi thu đầu gửi — tránh chỉ có PAYMENT + anonymousUser.
+            orderFacadeService.appendWarehouseReceiveIfMissing(order);
             orderFacadeService.collectSenderFareOnWarehouseIn(order);
         }
         return orderFacadeService.getByCode(order.getOrderCode());

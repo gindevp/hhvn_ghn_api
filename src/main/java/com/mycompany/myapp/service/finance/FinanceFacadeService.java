@@ -1736,15 +1736,23 @@ public class FinanceFacadeService {
     }
 
     /**
-     * Chủ nợ phía gửi khi chưa có payment collector:
-     * 1) NV nhập kho gửi / xác nhận nháp;
-     * 2) NV tạo đơn nội bộ (quầy) — chịu cước GUI_TRA tại quầy, không đẩy sang người gán/quét lên xe;
-     * 3) Đơn khách / không có actor tạo: người quét lên xe / gán xe đầu tiên;
-     * 4) fallback pickup / CREATE qua {@link #resolveDebtOwner}.
+     * Chủ nợ phía gửi khi chưa có payment collector (hoặc collector = anonymousUser/system):
+     * 1) Đơn lấy tận nơi: người book ship (AHAMOVE_BOOK / GRAB_BOOK);
+     * 2) NV nhập kho gửi / xác nhận nháp;
+     * 3) Đơn quầy: NV tạo đơn nội bộ;
+     * 4) Đơn khách / không có actor tạo: người quét lên xe / gán xe đầu tiên;
+     * 5) fallback pickup / CREATE qua {@link #resolveDebtOwner}.
      */
     private String resolveSenderWhActor(ShipmentOrder order) {
         if (order.getId() != null) {
             List<OrderEvent> events = orderEventRepository.findByOrder_IdOrderByEventAtAsc(order.getId());
+            // LTN: nợ thu đầu gửi = người book Aha/Grab lấy hàng (không gán tổng đài tạo đơn / anonymousUser).
+            if (Boolean.TRUE.equals(order.getHomePickup())) {
+                String booker = latestBookShipActor(events);
+                if (booker != null) {
+                    return booker;
+                }
+            }
             for (int i = events.size() - 1; i >= 0; i--) {
                 OrderEvent event = events.get(i);
                 String action = event.getAction() == null ? "" : event.getAction().trim().toUpperCase();
@@ -1755,13 +1763,15 @@ public class FinanceFacadeService {
                     }
                 }
             }
-            // Tạo đơn nội bộ: người tạo = người thu tại quầy. Không gán nợ cho ASSIGN_TRIP / SCAN_OUT.
-            for (OrderEvent event : events) {
-                String action = event.getAction() == null ? "" : event.getAction().trim();
-                if ("CREATE".equalsIgnoreCase(action) || "CREATED".equalsIgnoreCase(action)) {
-                    String actor = staffActor(event);
-                    if (actor != null) {
-                        return actor;
+            if (!Boolean.TRUE.equals(order.getHomePickup())) {
+                // Tạo đơn nội bộ quầy: người tạo = người thu tại quầy. Không gán nợ cho ASSIGN_TRIP / SCAN_OUT.
+                for (OrderEvent event : events) {
+                    String action = event.getAction() == null ? "" : event.getAction().trim();
+                    if ("CREATE".equalsIgnoreCase(action) || "CREATED".equalsIgnoreCase(action)) {
+                        String actor = staffActor(event);
+                        if (actor != null) {
+                            return actor;
+                        }
                     }
                 }
             }
@@ -1776,6 +1786,25 @@ public class FinanceFacadeService {
             }
         }
         return resolveDebtOwner(order);
+    }
+
+    /** Người book Aha/Grab gần nhất (lấy hoặc giao). */
+    private static String latestBookShipActor(List<OrderEvent> events) {
+        if (events == null || events.isEmpty()) {
+            return null;
+        }
+        for (int i = events.size() - 1; i >= 0; i--) {
+            OrderEvent event = events.get(i);
+            String action = event.getAction() == null ? "" : event.getAction().trim().toUpperCase();
+            if (!"AHAMOVE_BOOK".equals(action) && !"GRAB_BOOK".equals(action)) {
+                continue;
+            }
+            String actor = staffActor(event);
+            if (actor != null) {
+                return actor;
+            }
+        }
+        return null;
     }
 
     /** Actor là nhân viên (bỏ khách tự tạo đơn / hệ thống). */
