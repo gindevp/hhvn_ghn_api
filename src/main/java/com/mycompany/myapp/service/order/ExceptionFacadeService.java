@@ -237,8 +237,13 @@ public class ExceptionFacadeService {
         if (order.getStatus() != OrderStatus.RETURNING) {
             throw new BadRequestAlertException("Order is not in return flow", ENTITY, "returnCancelNotActive");
         }
-        if (order.getForwardStage() != ForwardStage.WH_IN) {
-            throw new BadRequestAlertException("Huỷ hoàn chỉ khi đơn còn ở nhập kho gửi (chiều hoàn)", ENTITY, "returnCancelWrongStage");
+        ForwardStage fs = order.getForwardStage();
+        if (fs != ForwardStage.WH_IN && fs != ForwardStage.DEST_WH_IN) {
+            throw new BadRequestAlertException(
+                "Huỷ hoàn chỉ khi đơn còn ở nhập kho gửi / nhập kho (chưa lên xe chiều hoàn)",
+                ENTITY,
+                "returnCancelWrongStage"
+            );
         }
 
         OrderReturnRequest req = order.getReturnRequest();
